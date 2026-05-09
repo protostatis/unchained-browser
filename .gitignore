@@ -31,3 +31,6 @@
 /.claude/
 /python/unbrowser/_bin/*
 !/python/unbrowser/_bin/.gitkeep
+
+# Local scratch files
+/skills/_awesome-pr.md

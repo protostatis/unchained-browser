@@ -53,7 +53,7 @@ When in doubt about whether a task fits the intended use, surface the action to 
 ### Install hygiene
 
 - **Prefer isolated installation.** `pipx install pyunbrowser` or `uv tool install pyunbrowser` quarantine the binary and its native dependency. `pip install --user` is acceptable but mixes the binary into the user's site-packages.
-- **Pin the version in production.** `pipx install pyunbrowser==0.0.6` (or whatever version is current — see https://pypi.org/project/pyunbrowser/). The wheel ships a platform-specific native binary; verify the upstream repository (https://github.com/protostatis/unbrowser) before upgrading across versions.
+- **Install the latest version.** `pipx install pyunbrowser` (or `pipx upgrade pyunbrowser` if you already have it) pulls the current release. The wheel ships a platform-specific native binary; verify the upstream repository (https://github.com/protostatis/unbrowser) before upgrading across versions.
 
 These rules are conservative on purpose. The skill's purpose is browsing, not authenticated automation — when in doubt, escalate to a managed-browser flow that has the user in the loop.
 

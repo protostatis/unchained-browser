@@ -3032,7 +3032,11 @@ fn score_to_probabilities(mut scores: Vec<(&'static str, f64)>) -> (Value, f64, 
         }
         map.insert(name.to_string(), Value::from(prob));
     }
-    (Value::Object(map), top_prob, (top_prob - second_prob).max(0.0))
+    (
+        Value::Object(map),
+        top_prob,
+        (top_prob - second_prob).max(0.0),
+    )
 }
 
 fn normalized_count(count: u64, scale: f64) -> f64 {
