@@ -162,8 +162,8 @@ jobs:
         run: |
           if ! command -v rustup >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail https://sh.rustup.rs | sh -s -- --default-toolchain none -y
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
+          export PATH="$HOME/.cargo/bin:$PATH"
           rustup toolchain install stable --target x86_64-unknown-linux-gnu --profile minimal --no-self-update
           rustup default stable
 
