@@ -3048,6 +3048,10 @@ fn derive_tool_likelihoods(
     challenge: &Value,
     scripts: &Value,
 ) -> Value {
+    // These scales are soft saturation points: a count near the scale value
+    // contributes ~63% of the feature's max, and larger counts taper off.
+    // The goal is to keep page-local signals comparable without letting one
+    // noisy count dominate the ranking.
     let empty_slice: &[Value] = &[];
     let structure: &[Value] = blockmap
         .get("structure")
@@ -3180,15 +3184,18 @@ fn derive_tool_likelihoods(
             .max(0.5)
     };
 
+    // Structure / semantics scales.
     let page_structure = normalized_count(structure.len() as u64, 3.0);
     let heading_signal = normalized_count(headings, 6.0);
     let main_heading_signal = normalized_count(main_headings, 4.0);
+    // Selector / interaction scales.
     let selector_signal = normalized_count(data_testid + aria_label + role, 20.0);
     let data_testid_signal = normalized_count(data_testid, 12.0);
     let link_signal = normalized_count(links, 20.0);
     let button_signal = normalized_count(buttons, 4.0);
     let input_signal = normalized_count(inputs, 2.0);
     let form_signal = normalized_count(forms, 1.0);
+    // Dense content / data scales.
     let table_signal = if table_total > 0 { table_ratio } else { 0.0 };
     let td_signal = if td_total > 0 { td_ratio } else { 0.0 };
     let list_signal = if li_total > 0 { li_ratio } else { 0.0 };
@@ -4629,6 +4636,67 @@ mod outcome_tests {
             &Value::Null,
             &Value::Null,
             &scripts,
+        );
+
+        let recs = advice
+            .get("tool_recommendations")
+            .and_then(|v| v.as_array())
+            .expect("tool_recommendations array");
+        assert_eq!(recs[0].as_str(), Some("chrome_escalation"));
+    }
+
+    #[test]
+    fn tool_likelihoods_all_zero_signals_remain_finite() {
+        let advice = derive_tool_likelihoods(
+            200,
+            false,
+            &empty_blockmap(),
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+        );
+
+        let probs = advice
+            .get("tool_likelihoods")
+            .and_then(|v| v.as_object())
+            .expect("tool_likelihoods object");
+        let sum: f64 = probs.values().map(|v| v.as_f64().unwrap_or(f64::NAN)).sum();
+        assert!(sum.is_finite());
+        assert!((sum - 1.0).abs() < 1e-9);
+        for value in probs.values() {
+            assert!(value.as_f64().unwrap_or(f64::NAN).is_finite());
+        }
+        assert_eq!(
+            advice
+                .get("tool_recommendations")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn tool_likelihoods_conflicting_signals_still_downweight_shells() {
+        let blockmap = json!({
+            "title": "Hybrid Page",
+            "structure": [
+                {"role": "main", "ref": "e:2", "counts": {"links": 50, "buttons": 3, "inputs": 2}}
+            ],
+            "headings": [{"level": 1, "ref": "e:10", "text": "Loading"}],
+            "main_headings": [{"level": 1, "ref": "e:10", "text": "Loading"}],
+            "selectors": {"data_testid": 90, "aria_label": 18, "role": 4},
+            "interactives": {"links": 50, "buttons": 3, "inputs": [], "forms": []},
+            "density": {"tables": null, "td": null, "li": null, "json_scripts": 0, "thin_shell": true, "likely_js_filled": true},
+        });
+        let advice = derive_tool_likelihoods(
+            200,
+            true,
+            &blockmap,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &json!({"inline_count": 2, "external_count": 1, "executed": 1, "interrupted": 2}),
         );
 
         let recs = advice

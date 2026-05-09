@@ -266,7 +266,7 @@ cargo build --release
 JSON-RPC stdin ─┐    ┌─ stdout
                 ▼    ▲
          ┌────────────────────┐
-         │  rquest (Chrome131 │   ┌──────────┐    ┌──────────────────┐
+          │  request (Chrome131│   ┌──────────┐    ┌──────────────────┐
          │  TLS+H2 fingerprint)├──▶ html5ever ├───▶ rquickjs +       │
          │                    │   │  parser  │    │  dom.js +        │
          │  cookie_store      │   └──────────┘    │  blockmap.js +   │
