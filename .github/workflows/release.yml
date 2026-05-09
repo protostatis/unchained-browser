@@ -152,20 +152,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install build deps
+        run: |
+          apt-get update
+          apt-get install -y ca-certificates cmake curl git build-essential ninja-build pkg-config
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail https://sh.rustup.rs | sh -s -- --default-toolchain none -y
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install stable --target x86_64-unknown-linux-gnu --profile minimal --no-self-update
+          rustup default stable
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
         with:
           key: x86_64-unknown-linux-gnu
-
-      - name: Install build deps
-        run: |
-          apt-get update
-          apt-get install -y ca-certificates cmake curl git build-essential ninja-build pkg-config
 
       - name: Build release binary
         run: cargo build --release --target x86_64-unknown-linux-gnu
