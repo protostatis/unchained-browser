@@ -1,0 +1,44 @@
+[
+  {
+    "url": "https://news.ycombinator.com/",
+    "task": "Report the text of the first story title on the front page.",
+    "expected_answer": "Internet Archive Switzerland",
+    "match": "exact",
+    "notes": "Front-page SSR baseline; the first title is stable enough for snapshot scoring."
+  },
+  {
+    "url": "https://www.bbc.com/news",
+    "task": "Report the first visible section headline on the page.",
+    "expected_answer": "Putin denounces Nato at scaled back Victory Day parade",
+    "match": "exact",
+    "notes": "Selector/text judgment page; should favor query_text or text_main."
+  },
+  {
+    "url": "https://www.ft.com/",
+    "task": "Report the main H1 text from the homepage.",
+    "expected_answer": "Financial Times Home",
+    "match": "exact",
+    "notes": "Data-heavy homepage; designed to test whether the agent reaches for extract or text_main."
+  },
+  {
+    "url": "https://www.cnbc.com/markets/",
+    "task": "Report the main page heading.",
+    "expected_answer": "Markets",
+    "match": "exact",
+    "notes": "Dense market page with SSR shell behavior."
+  },
+  {
+    "url": "https://docs.python.org/3/",
+    "task": "Report the main page heading.",
+    "expected_answer": "Python 3.14.5rc1 documentation",
+    "match": "exact",
+    "notes": "Stable documentation page; easy to verify but good for a control case."
+  },
+  {
+    "url": "https://github.com/anthropics/anthropic-sdk-python",
+    "task": "Report the page title shown for the repository page.",
+    "expected_answer": "GitHub - anthropics/anthropic-sdk-python · GitHub",
+    "match": "exact",
+    "notes": "Repo browsing page; useful for comparing query vs text_main vs title handling."
+  }
+]

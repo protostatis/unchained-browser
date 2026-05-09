@@ -53,6 +53,15 @@
     };
   }
 
+  function countSelector(root, selector) {
+    if (!root || !selector || !selector.trim()) return 0;
+    try {
+      return root.querySelectorAll(selector).length;
+    } catch (e) {
+      return 0;
+    }
+  }
+
   globalThis.__blockmap = function() {
     var body = document.body;
     if (!body) {
@@ -119,6 +128,16 @@
         fields: f.querySelectorAll('input, textarea, select').length,
       });
     }
+
+    // Stable selector hints are concrete, page-local signals that help agents
+    // choose between CSS querying and text/extract fallbacks. `role` here is
+    // explicit only; HTML's implicit semantic roles are not counted.
+    var contentRoot = document.querySelector('main, [role="main"], article, #root, #app') || body;
+    var selectors = {
+      data_testid: countSelector(contentRoot, '[data-testid]'),
+      aria_label: countSelector(contentRoot, '[aria-label]'),
+      role: countSelector(contentRoot, '[role]'),
+    };
 
     // Structure: HTML5 landmarks first; fall back to significant top-level children.
     var structure = [];
@@ -241,12 +260,16 @@
     if (jsonScripts > 0) {
       ascii.push('  JSON SCRIPTS: ' + jsonScripts + ' (data may be embedded — try `extract()` first, it covers ld+json / __NEXT_DATA__ / Magento / Shopify)');
     }
+    if (selectors.data_testid || selectors.aria_label || selectors.role) {
+      ascii.push('  SELECTOR HINTS: data-testid=' + selectors.data_testid + ' aria=' + selectors.aria_label + ' role=' + selectors.role);
+    }
 
     return {
       title: document.title || '',
       structure: structure,
       headings: headings,
       main_headings: mainHeadings,
+      selectors: selectors,
       interactives: {
         links: links.length,
         buttons: buttons.length,

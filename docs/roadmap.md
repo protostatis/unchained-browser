@@ -108,6 +108,14 @@ better posteriors + bundle compression land together as a coherent v0.0.7.
 
 ## Release process (record so we don't re-discover it next time)
 
+See also: `docs/publishing.md`.
+
+Current publication paths are split by artifact:
+
+- **Automated in GitHub Actions**: Rust binary release, GitHub Release assets, Python wheels, and PyPI publish.
+- **Manual**: ClawHub skill publish.
+- **External but documented**: crates.io `cargo publish` and the Homebrew tap in `protostatis/homebrew-tap`.
+
 For tagging a new binary release:
 
 1. Bump **both** `Cargo.toml` and `python/pyproject.toml` to the new
@@ -116,18 +124,42 @@ For tagging a new binary release:
 2. Commit. Push to main.
 3. `git tag -a vX.Y.Z -m "..."` and `git push origin vX.Y.Z`.
 4. The `release.yml` workflow runs on tag push: builds 3 platform
-   binaries, creates the GitHub Release with tarballs + sha256s,
-   publishes wheels + sdist to PyPI via OIDC trusted publishing.
+    binaries, creates the GitHub Release with tarballs + sha256s,
+    publishes wheels + sdist to PyPI via OIDC trusted publishing.
 5. Wait ~1-2 minutes for PyPI CDN to propagate
-   (`https://pypi.org/pypi/pyunbrowser/<version>/json`).
+    (`https://pypi.org/pypi/pyunbrowser/<version>/json`).
+
+For publishing the Rust crate to crates.io:
+
+1. Ensure `CARGO_REGISTRY_TOKEN` is set in your shell or `.env`.
+2. Bump `Cargo.toml` version.
+3. Run `cargo publish` from the repo root.
+
+For updating Homebrew:
+
+1. Tag and release `unbrowser` first so the tarballs exist on GitHub Releases.
+2. Clone or update `protostatis/homebrew-tap`.
+3. Run `./bin/update-shas.sh vX.Y.Z` to fetch release tarballs and patch
+   `Formula/unbrowser.rb`.
+4. Review the diff, commit, and push the tap repo.
 
 For bumping the **skill** version (separate from binary version):
 
 1. Edit `skills/unbrowser/SKILL.md` — bump `version:` frontmatter and
    the content. Commit + push to main.
-2. **Manually** publish to ClawHub:
+2. **Manually** publish to ClawHub with the exact version string:
    `clawhub publish skills/unbrowser --version X.Y.Z --changelog "..."`.
    ClawHub does NOT auto-poll GitHub; the publish step is required.
+3. The CLI requires explicit semver in `--version` and will reject a
+   reused version with `Version already exists`.
 
 The binary version (Cargo.toml) and skill version (SKILL.md frontmatter)
 move independently — the skill can iterate without a binary release.
+
+## Release checklist
+
+1. Bump `Cargo.toml` and `python/pyproject.toml` together.
+2. Merge and tag `vX.Y.Z`.
+3. Let `release.yml` publish the release binaries and PyPI packages.
+4. If the skill changed, bump `skills/unbrowser/SKILL.md` and publish it to
+   ClawHub with `clawhub publish skills/unbrowser --version X.Y.Z --changelog "..."`.

@@ -98,7 +98,7 @@ with Client() as ub:
 <details>
 <summary>Bare-RPC version (if you can't use Python)</summary>
 
-The same demo without the wrapper — useful for languages other than Python or one-shot bash calls. The protocol is JSON-RPC over stdin/stdout, one JSON object per line:
+The same demo without the wrapper — useful for languages other than Python or multi-step sessions. The protocol is JSON-RPC over stdin/stdout, one JSON object per line:
 
 ```python
 import subprocess, json
@@ -119,6 +119,16 @@ for s in call("query", selector=".titleline > a")[:3]:
 That's the entire protocol surface. Same shape from any language with subprocess + JSON.
 
 </details>
+
+### One-shot CLI
+
+For shell-friendly calls, use the convenience subcommand:
+
+```bash
+unbrowser navigate https://news.ycombinator.com --json
+```
+
+That prints one JSON result and exits. Use JSON-RPC only when you need a persistent session.
 
 ## SPA tier — what works, what doesn't
 
@@ -211,7 +221,7 @@ unbrowser 2> >(python3 scripts/watch.py)
 
 | | |
 |---|---|
-| `navigate {url}` | fetch + parse + return `{status, url, bytes, headers, blockmap, challenge}` |
+| `navigate {url}` | fetch + parse + return `{status, url, bytes, headers, blockmap, challenge, tool_confidence, tool_margin, tool_likelihoods, tool_recommendations}` |
 | `query {selector}` | CSS query → `[{ref, tag, attrs, text}]` |
 | `text {selector?}` | textContent of FIRST match (default `body`). On Wikipedia/MDN/news sites the first `<p>` is often a hatnote — prefer `text_main` for article body. |
 | `text_main` | textContent of `<main>` / `[role=main]` / single `<article>` / longest non-chrome subtree. Use this for reading article/docs/blog content. |
@@ -222,6 +232,8 @@ unbrowser 2> >(python3 scripts/watch.py)
 | `cookies_set / cookies_get / cookies_clear` | session jar |
 | `blockmap` | recompute the page summary |
 | `body` | raw HTML of last navigation |
+
+`blockmap.selectors` surfaces concrete selector hints for the current page (`data-testid`, `aria-label`, `role`) so agents can bias toward `query` or `query_text` without guessing.
 
 CSS selector engine: tag, id, class, `[attr=val]` (also `^=`, `$=`, `*=`, `~=`), all four combinators (` `, `>`, `+`, `~`), `:first/last/nth-child/of-type`, `:only-child/of-type`. Use `eval` for `:not()`, `:has()`, formulas.
 
@@ -264,8 +276,8 @@ cargo build --release
 JSON-RPC stdin ─┐    ┌─ stdout
                 ▼    ▲
          ┌────────────────────┐
-         │  rquest (Chrome131 │   ┌──────────┐    ┌──────────────────┐
-         │  TLS+H2 fingerprint)├──▶ html5ever ├───▶ rquickjs +       │
+          │  request (Chrome131│   ┌──────────┐    ┌──────────────────┐
+          │  TLS+H2 fingerprint)├──▶ html5ever ├───▶ rquickjs +       │
          │                    │   │  parser  │    │  dom.js +        │
          │  cookie_store      │   └──────────┘    │  blockmap.js +   │
          │  (jar)             │                   │  interact.js     │

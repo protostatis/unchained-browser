@@ -1,0 +1,26 @@
+[
+  {
+    "url": "https://news.ycombinator.com/",
+    "category": "ab_eval",
+    "expected_tool": "query",
+    "notes": "SSR list page; CSS selection should win"
+  },
+  {
+    "url": "https://www.bbc.com/news",
+    "category": "ab_eval",
+    "expected_tool": "query_text",
+    "notes": "news page with stable content hooks and visible labels"
+  },
+  {
+    "url": "https://www.ft.com/",
+    "category": "ab_eval",
+    "expected_tool": "extract",
+    "notes": "data-heavy homepage with embedded JSON"
+  },
+  {
+    "url": "https://www.cnbc.com/world/",
+    "category": "ab_eval",
+    "expected_tool": "extract",
+    "notes": "structured-data-heavy homepage"
+  }
+]

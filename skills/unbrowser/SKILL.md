@@ -1,7 +1,7 @@
 ---
 name: unbrowser
 description: Cheap first-pass web browsing without launching Chrome — fetch SSR pages, follow links, query the DOM, run JS, detect bot-wall challenges. Escalate to OpenClaw's managed browser when the page can't be served headlessly.
-version: 0.0.10
+version: 0.0.12
 tags:
   - browser
   - web-search
@@ -53,7 +53,7 @@ When in doubt about whether a task fits the intended use, surface the action to 
 ### Install hygiene
 
 - **Prefer isolated installation.** `pipx install pyunbrowser` or `uv tool install pyunbrowser` quarantine the binary and its native dependency. `pip install --user` is acceptable but mixes the binary into the user's site-packages.
-- **Pin the version in production.** `pipx install pyunbrowser==0.0.6` (or whatever version is current — see https://pypi.org/project/pyunbrowser/). The wheel ships a platform-specific native binary; verify the upstream repository (https://github.com/protostatis/unbrowser) before upgrading across versions.
+- **Install the latest version.** `pipx install pyunbrowser` (or `pipx upgrade pyunbrowser` if you already have it) pulls the current release. The wheel ships a platform-specific native binary; verify the upstream repository (https://github.com/protostatis/unbrowser) before upgrading across versions.
 
 These rules are conservative on purpose. The skill's purpose is browsing, not authenticated automation — when in doubt, escalate to a managed-browser flow that has the user in the loop.
 
@@ -117,6 +117,16 @@ EOF
 
 `navigate` returns `{status, url, bytes, blockmap, challenge}`. The `blockmap` is your one-shot orientation payload — use it to plan queries before pulling raw HTML.
 
+## Quick start (one-shot CLI)
+
+For shell-friendly single requests, use the convenience subcommand:
+
+```bash
+unbrowser navigate https://news.ycombinator.com --json
+```
+
+That prints one JSON result and exits. Use the RPC mode above when you need a persistent session.
+
 ## Quick start (Python)
 
 ```python
@@ -148,6 +158,16 @@ These are the methods the agent will use on every task:
 - `type {ref, text}` — set value, fire `input` + `change`.
 - `submit {ref}` — gather GET-form fields, navigate to action URL.
 - `close` — exit.
+
+## Tool hints
+
+`navigate` also returns `tool_likelihoods` and `tool_recommendations`. Use them as a ranking, not a mandate:
+
+- Start with the highest-ranked suggestion that still matches the task.
+- Prefer `query_text` / `query` when the page has stable visible labels or selector hints.
+- Prefer `text_main` when the task is reading article/docs content.
+- Prefer `extract`, `extract_list`, or `extract_table` when the page exposes structured data.
+- If `chrome_escalation` is near the top, stop guessing and escalate instead of burning calls.
 
 ## RPC methods — advanced (use sparingly)
 

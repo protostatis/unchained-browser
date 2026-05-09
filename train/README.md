@@ -139,6 +139,32 @@ python3 train/pack.py --in train/aggregates/ --out prefit/v1.bundle
 
 Bundles aggregated per-domain prefits into a single MessagePack artifact for the runtime to load.
 
+## A/B eval
+
+Small fixed corpus for comparing a baseline build (`A`, usually `main`) against a candidate build (`B`) on tool ranking:
+
+```bash
+python3 train/eval_tool_likelihoods.py \
+  --binary-a target/main/unbrowser \
+  --binary-b target/tool-probability-map/unbrowser \
+  --corpus train/corpus/tool_likelihoods_ab.json
+```
+
+The corpus intentionally stays tiny and concrete: SSR list page, selector-rich news page, and two data-heavy pages.
+
+## Subagent task eval
+
+Task-completion benchmark for comparing a hinted binary (emits `tool_*`) against a no-hint binary such as obscura.
+
+```bash
+python3 train/eval_subagent_tasks.py \
+  --hinted-results hinted.jsonl \
+  --nohint-results nohint.jsonl
+```
+
+Each results file should contain one JSON object per task with `task_id`, `success`, `answer`, `steps`, and `elapsed_ms`.
+The corpus lives in `train/corpus/subagent_tasks.json`.
+
 ## Tests
 
 ```bash

@@ -38,9 +38,6 @@ jobs:
                                  # Smoke test runs the x86_64 binary via
                                  # Rosetta on the arm64 runner.
             wheel_platform: macosx_10_12_x86_64
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-20.04     # pin: glibc 2.31 — runs on AL2023 (2.34) and Ubuntu 20.04+
-            wheel_platform: manylinux_2_31_x86_64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm  # GitHub native ARM64 runner — covers Graviton2/3/4
             wheel_platform: manylinux_2_35_aarch64
@@ -67,10 +64,15 @@ jobs:
           # arm64 and x64; cargo --target handles the rest.
 
       - name: Install build deps (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build
+
+      - name: Install build deps (manylinux)
+        if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          yum install -y cmake ninja-build
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
@@ -143,6 +145,91 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-x86_64-unknown-linux-gnu:
+    name: Build x86_64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    container: ubuntu:20.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -yq --no-install-recommends ca-certificates cmake curl git build-essential ninja-build pkg-config clang libclang-dev python3 python3-pip python3-venv
+
+      - name: Install Rust toolchain
+        run: |
+          export HOME=/root
+          export CARGO_HOME=/root/.cargo
+          export RUSTUP_HOME=/root/.rustup
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail https://sh.rustup.rs | sh -s -- --default-toolchain none -y
+          fi
+          export PATH="$CARGO_HOME/bin:$PATH"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          echo "CARGO_HOME=$CARGO_HOME" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$RUSTUP_HOME" >> "$GITHUB_ENV"
+          rustup toolchain install stable --target x86_64-unknown-linux-gnu --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-gnu
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Smoke test (Unix)
+        run: |
+          echo '{"id":1,"method":"close"}' | ./target/x86_64-unknown-linux-gnu/release/unbrowser > /tmp/out
+          cat /tmp/out
+          grep -q '"result":"bye"' /tmp/out
+
+      - name: Package archive
+        run: |
+          cd target/x86_64-unknown-linux-gnu/release
+          tar -czf ../../../unbrowser-x86_64-unknown-linux-gnu.tar.gz unbrowser
+
+      - name: Compute checksum
+        run: |
+          sha256sum unbrowser-x86_64-unknown-linux-gnu.tar.gz > unbrowser-x86_64-unknown-linux-gnu.tar.gz.sha256
+          cat unbrowser-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+      - name: Bundle binary into Python package
+        run: |
+          cp target/x86_64-unknown-linux-gnu/release/unbrowser python/unbrowser/_bin/unbrowser
+          chmod +x python/unbrowser/_bin/unbrowser
+
+      - name: Build wheel
+        run: |
+          python3 -m pip install --upgrade pip build 'wheel>=0.40.0'
+          cd python && python3 -m build --wheel
+
+      - name: Re-tag wheel for manylinux_2_31_x86_64
+        # Hatchling emits py3-none-any because the Python code itself is pure
+        # Python; we retag only the platform because the wheel bundles the
+        # native binary in unbrowser/_bin/.
+        run: |
+          cd python/dist
+          # `--remove` strips the original platform tag before we add the real
+          # Linux target. `wheel tags` is required here because the package is
+          # not an extension module, just a Python wrapper around a binary.
+          python3 -m wheel tags --remove --platform-tag manylinux_2_31_x86_64 pyunbrowser-*-py3-none-any.whl
+          ls -la
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: unbrowser-x86_64-unknown-linux-gnu
+          path: |
+            unbrowser-x86_64-unknown-linux-gnu.tar.gz
+            unbrowser-x86_64-unknown-linux-gnu.tar.gz.sha256
+            python/dist/pyunbrowser-*.whl
+          if-no-files-found: error
+          retention-days: 7
+
   # Source distribution. Platform-neutral, no binary inside — lets users
   # on platforms we don't ship a wheel for build from source themselves
   # (and PyPI strongly prefers an sdist alongside any binary wheels).
@@ -180,10 +267,10 @@ jobs:
   #   Environment name: pypi   (must match the `environment:` field below)
   publish-pypi:
     name: Publish to PyPI
-    needs: [build, build-sdist]
+    needs: [build, build-x86_64-unknown-linux-gnu, build-sdist]
     runs-on: ubuntu-latest
-    # Only publish on tag pushes (skip workflow_dispatch test runs).
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Publish on tag pushes and explicit manual release dispatches.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     permissions:
       id-token: write   # required for OIDC trusted publishing
     environment:
@@ -212,7 +299,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: build
+    needs: [build, build-x86_64-unknown-linux-gnu]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -252,7 +339,7 @@ jobs:
             ### One-liner (macOS / Linux):
 
             ```bash
-            curl -L https://github.com/protostatis/unbrowser/releases/download/${{ github.ref_name }}/unbrowser-$(uname -m | sed 's/arm64/aarch64/')-$(uname -s | tr A-Z a-z | sed 's/darwin/apple-darwin/;s/linux/unknown-linux-gnu/').tar.gz \
+            curl -L https://github.com/protostatis/unbrowser/releases/download/${{ github.event.inputs.tag || github.ref_name }}/unbrowser-$(uname -m | sed 's/arm64/aarch64/')-$(uname -s | tr A-Z a-z | sed 's/darwin/apple-darwin/;s/linux/unknown-linux-gnu/').tar.gz \
               | tar xz -C /usr/local/bin
             unbrowser --mcp
             ```
