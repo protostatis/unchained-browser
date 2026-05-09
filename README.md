@@ -211,7 +211,7 @@ unbrowser 2> >(python3 scripts/watch.py)
 
 | | |
 |---|---|
-| `navigate {url}` | fetch + parse + return `{status, url, bytes, headers, blockmap, challenge}` |
+| `navigate {url}` | fetch + parse + return `{status, url, bytes, headers, blockmap, challenge, tool_likelihoods, tool_recommendations}` |
 | `query {selector}` | CSS query → `[{ref, tag, attrs, text}]` |
 | `text {selector?}` | textContent of FIRST match (default `body`). On Wikipedia/MDN/news sites the first `<p>` is often a hatnote — prefer `text_main` for article body. |
 | `text_main` | textContent of `<main>` / `[role=main]` / single `<article>` / longest non-chrome subtree. Use this for reading article/docs/blog content. |
@@ -222,6 +222,8 @@ unbrowser 2> >(python3 scripts/watch.py)
 | `cookies_set / cookies_get / cookies_clear` | session jar |
 | `blockmap` | recompute the page summary |
 | `body` | raw HTML of last navigation |
+
+`blockmap.selectors` surfaces concrete selector hints for the current page (`data-testid`, `aria-label`, `role`) so agents can bias toward `query` or `query_text` without guessing.
 
 CSS selector engine: tag, id, class, `[attr=val]` (also `^=`, `$=`, `*=`, `~=`), all four combinators (` `, `>`, `+`, `~`), `:first/last/nth-child/of-type`, `:only-child/of-type`. Use `eval` for `:not()`, `:has()`, formulas.
 

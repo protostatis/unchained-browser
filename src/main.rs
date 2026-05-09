@@ -1694,6 +1694,15 @@ impl Session {
         let extract_for_outcome = auto_extract.clone().unwrap_or(Value::Null);
         let network_for_outcome = network_stores.clone().unwrap_or(Value::Null);
         let challenge_for_outcome = challenge.clone().unwrap_or(Value::Null);
+        let tool_advice = derive_tool_likelihoods(
+            status,
+            exec_scripts,
+            &blockmap,
+            &extract_for_outcome,
+            &network_for_outcome,
+            &challenge_for_outcome,
+            &scripts_for_outcome,
+        );
         let (success, reasons, signals) = derive_outcome(
             status,
             exec_scripts,
@@ -1746,6 +1755,8 @@ impl Session {
             "scripts": scripts,
             "extract": auto_extract,
             "network_stores": network_stores,
+            "tool_likelihoods": tool_advice.get("tool_likelihoods").cloned().unwrap_or(Value::Null),
+            "tool_recommendations": tool_advice.get("tool_recommendations").cloned().unwrap_or(Value::Null),
         }))
     }
 
@@ -2991,6 +3002,312 @@ fn build_signals(
     })
 }
 
+fn score_to_probabilities(mut scores: Vec<(&'static str, f64)>) -> Value {
+    if scores.is_empty() {
+        return Value::Object(serde_json::Map::new());
+    }
+
+    let max_score = scores
+        .iter()
+        .map(|(_, score)| *score)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mut total = 0.0;
+    for (_, score) in &mut scores {
+        *score = (*score - max_score).exp();
+        total += *score;
+    }
+
+    let mut map = serde_json::Map::new();
+    for (name, score) in scores {
+        map.insert(
+            name.to_string(),
+            Value::from(if total > 0.0 { score / total } else { 0.0 }),
+        );
+    }
+    Value::Object(map)
+}
+
+fn normalized_count(count: u64, scale: f64) -> f64 {
+    if count == 0 || scale <= 0.0 {
+        0.0
+    } else {
+        1.0 - (-(count as f64) / scale).exp()
+    }
+}
+
+fn bool_score(flag: bool) -> f64 {
+    if flag { 1.0 } else { 0.0 }
+}
+
+fn derive_tool_likelihoods(
+    status: u16,
+    exec_scripts: bool,
+    blockmap: &Value,
+    extract: &Value,
+    network_stores: &Value,
+    challenge: &Value,
+    scripts: &Value,
+) -> Value {
+    let empty_slice: &[Value] = &[];
+    let structure: &[Value] = blockmap
+        .get("structure")
+        .and_then(|v| v.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(empty_slice);
+    let headings = blockmap
+        .get("headings")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len() as u64)
+        .unwrap_or(0);
+    let main_headings = blockmap
+        .get("main_headings")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len() as u64)
+        .unwrap_or(0);
+
+    let interactives = blockmap.get("interactives").unwrap_or(&Value::Null);
+    let links = interactives
+        .get("links")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let buttons = interactives
+        .get("buttons")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let inputs = interactives
+        .get("inputs")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len() as u64)
+        .unwrap_or(0);
+    let forms = interactives
+        .get("forms")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len() as u64)
+        .unwrap_or(0);
+
+    let density = blockmap.get("density").unwrap_or(&Value::Null);
+    let tables = density.get("tables").unwrap_or(&Value::Null);
+    let table_total = tables.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+    let table_filled = tables.get("filled").and_then(|v| v.as_u64()).unwrap_or(0);
+    let table_ratio = tables
+        .get("ratio")
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| {
+            if table_total > 0 {
+                table_filled as f64 / table_total as f64
+            } else {
+                0.0
+            }
+        });
+    let td = density.get("td").unwrap_or(&Value::Null);
+    let td_total = td.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+    let td_ratio = td.get("ratio").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let li = density.get("li").unwrap_or(&Value::Null);
+    let li_total = li.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+    let li_ratio = li.get("ratio").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let json_scripts = density
+        .get("json_scripts")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let thin_shell = density
+        .get("thin_shell")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let likely_js_filled = density
+        .get("likely_js_filled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let selectors = blockmap.get("selectors").unwrap_or(&Value::Null);
+    let data_testid = selectors
+        .get("data_testid")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let aria_label = selectors
+        .get("aria_label")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let role = selectors.get("role").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let extract_confidence = extract
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let extract_truncated = extract
+        .get("truncated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || extract.get("primary_truncated").is_some();
+
+    let network_capture_count = network_stores
+        .get("count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let network_total_bytes = network_stores
+        .get("total_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let scripts_executed = scripts
+        .get("executed")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let scripts_interrupted = scripts
+        .get("interrupted")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let scripts_total = scripts
+        .get("inline_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        + scripts
+            .get("external_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+    let script_pathology = if exec_scripts && scripts_total > 0 {
+        scripts_interrupted as f64 / scripts_total as f64
+    } else {
+        0.0
+    };
+
+    let challenge_score = if challenge.is_null() {
+        0.0
+    } else {
+        challenge
+            .get("confidence")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0)
+            .max(0.5)
+    };
+
+    let page_structure = normalized_count(structure.len() as u64, 3.0);
+    let heading_signal = normalized_count(headings, 6.0);
+    let main_heading_signal = normalized_count(main_headings, 4.0);
+    let selector_signal = normalized_count(data_testid + aria_label + role, 20.0);
+    let data_testid_signal = normalized_count(data_testid, 12.0);
+    let link_signal = normalized_count(links, 20.0);
+    let button_signal = normalized_count(buttons, 4.0);
+    let input_signal = normalized_count(inputs, 2.0);
+    let form_signal = normalized_count(forms, 1.0);
+    let table_signal = if table_total > 0 { table_ratio } else { 0.0 };
+    let td_signal = if td_total > 0 { td_ratio } else { 0.0 };
+    let list_signal = if li_total > 0 { li_ratio } else { 0.0 };
+    let json_signal = normalized_count(json_scripts, 1.0);
+    let network_signal = normalized_count(network_capture_count, 1.0);
+    let network_bytes_signal = normalized_count(network_total_bytes, 5_000.0);
+    let status_signal = if (200..400).contains(&status) {
+        0.0
+    } else {
+        1.0
+    };
+
+    let query_score = 0.15
+        + 1.0 * page_structure
+        + 0.55 * heading_signal
+        + 0.35 * main_heading_signal
+        + 0.55 * data_testid_signal
+        + 0.25 * link_signal
+        + 0.20 * button_signal
+        + 0.10 * input_signal
+        - 0.85 * bool_score(thin_shell)
+        - 0.70 * bool_score(likely_js_filled)
+        - 1.10 * challenge_score;
+
+    let query_text_score = 0.20
+        + 0.70 * page_structure
+        + 0.90 * heading_signal
+        + 1.05 * main_heading_signal
+        + 0.85 * selector_signal
+        + 0.20 * link_signal
+        - 0.35 * bool_score(thin_shell)
+        - 0.20 * bool_score(likely_js_filled)
+        - 0.25 * challenge_score;
+
+    let text_main_score = 0.15
+        + 1.00 * main_heading_signal
+        + 0.60 * page_structure
+        + 0.20 * heading_signal
+        + 0.10 * selector_signal
+        - 0.45 * bool_score(thin_shell)
+        - 0.30 * bool_score(likely_js_filled)
+        - 0.15 * challenge_score;
+
+    let extract_score = 0.10
+        + 1.05 * extract_confidence
+        + 0.60 * json_signal
+        + 0.20 * network_signal
+        + 0.15 * network_bytes_signal
+        + if extract_truncated { 0.25 } else { 0.0 }
+        - 0.20 * bool_score(thin_shell)
+        - 0.15 * challenge_score;
+
+    let extract_table_score = 0.05
+        + 1.35 * table_signal
+        + 0.25 * normalized_count(table_total, 2.0)
+        + 0.20 * td_signal
+        + 0.10 * page_structure
+        - 0.10 * bool_score(thin_shell)
+        - 0.05 * challenge_score;
+
+    let extract_list_score = 0.05
+        + 1.25 * list_signal
+        + 0.25 * normalized_count(li_total, 20.0)
+        + 0.25 * main_heading_signal
+        + 0.10 * page_structure
+        + 0.10 * selector_signal
+        - 0.10 * bool_score(thin_shell)
+        - 0.05 * challenge_score;
+
+    let network_stores_score = 0.05
+        + 1.10 * network_signal
+        + 0.15 * network_bytes_signal
+        + 0.30 * json_signal
+        + 0.10 * normalized_count(scripts_executed, 3.0)
+        - 0.10 * challenge_score;
+
+    let click_score = 0.10
+        + 0.95 * link_signal
+        + 0.75 * button_signal
+        + 0.15 * page_structure
+        + 0.10 * selector_signal
+        - 0.10 * challenge_score;
+
+    let type_score = 0.05 + 1.20 * input_signal + 0.85 * form_signal + 0.10 * selector_signal
+        - 0.05 * challenge_score;
+
+    let submit_score = 0.05 + 1.30 * form_signal + 0.60 * input_signal + 0.10 * page_structure
+        - 0.05 * challenge_score;
+
+    let chrome_escalation_score = 0.02
+        + 1.90 * challenge_score
+        + 0.95 * bool_score(thin_shell)
+        + 0.80 * bool_score(likely_js_filled)
+        + 0.60 * script_pathology
+        + 0.40 * status_signal;
+
+    let ordered = vec![
+        ("query", query_score),
+        ("query_text", query_text_score),
+        ("text_main", text_main_score),
+        ("extract", extract_score),
+        ("extract_table", extract_table_score),
+        ("extract_list", extract_list_score),
+        ("network_stores", network_stores_score),
+        ("click", click_score),
+        ("type", type_score),
+        ("submit", submit_score),
+        ("chrome_escalation", chrome_escalation_score),
+    ];
+
+    let mut top = ordered.clone();
+    top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    json!({
+        "tool_likelihoods": score_to_probabilities(ordered),
+        "tool_recommendations": top.into_iter().map(|(name, _)| name).collect::<Vec<_>>(),
+    })
+}
+
 // Phase A: validated outcome reporting. Shared between rpc_main and
 // dispatch_tool so the validation and event shape stay canonical. v0
 // just emits the NDJSON event — no posterior updates yet (see
@@ -3469,7 +3786,7 @@ fn mcp_tools() -> Value {
     json!([
         {
             "name": "navigate",
-            "description": "Fetch a URL with Chrome-fingerprinted HTTP (rquest, Chrome 131 emulation). Parses HTML, seeds the JS DOM, returns BlockMap inline. With `exec_scripts: true`, extracts inline AND external <script> tags from the parsed HTML, fetches externals in parallel (8s per-fetch timeout), eval's them in document order in QuickJS (with shims for setTimeout/fetch/etc.), then settles the event loop and fires DOMContentLoaded + load. `<script async>` is honored: async scripts execute after the sync queue. When `--policy=blocklist` is set, tracker URLs are blocked at script-fetch time (see scripts.policy_blocked in the result). Returns a `scripts` summary with inline_count, external_count, async_count, policy_blocked, executed, errors.\n\nAuto-extract: when the page embeds JSON-bearing <script> tags (density.json_scripts > 0 — covers application/json, application/ld+json, text/x-magento-init, text/x-shopify-app, etc.), navigate auto-runs `extract()` and returns the result as the `extract` field. Saves a round trip on the common case where the data the JS would have rendered is already sitting in the HTML — JSON-LD article schemas on news sites, __NEXT_DATA__ page state on Next.js apps, json_in_script product blobs on Magento/Shopify, GitHub RSC payloads, etc. Capped at 256 KB inline; over that limit `extract` returns a stub with strategy/confidence/size_bytes/hint and the agent should call `extract()` explicitly to retrieve the full payload. Pages with no embedded JSON get extract:null and pay zero extra cost.\n\nAuto-solve: Reddit's JS proof-of-work challenge (provider: reddit_js_challenge) is transparently solved — the challenge is detected, the GET solution URL is computed (solution = hex_value + hex_value), and the real page is returned in one navigate call. challenge:null on the result means the real page was served. Subsequent navigations in the same session carry the clearance cookie and skip the challenge entirely.",
+            "description": "Fetch a URL with Chrome-fingerprinted HTTP (rquest, Chrome 131 emulation). Parses HTML, seeds the JS DOM, returns BlockMap inline. With `exec_scripts: true`, extracts inline AND external <script> tags from the parsed HTML, fetches externals in parallel (8s per-fetch timeout), eval's them in document order in QuickJS (with shims for setTimeout/fetch/etc.), then settles the event loop and fires DOMContentLoaded + load. `<script async>` is honored: async scripts execute after the sync queue. When `--policy=blocklist` is set, tracker URLs are blocked at script-fetch time (see scripts.policy_blocked in the result). Returns a `scripts` summary with inline_count, external_count, async_count, policy_blocked, executed, errors.\n\nAuto-extract: when the page embeds JSON-bearing <script> tags (density.json_scripts > 0 — covers application/json, application/ld+json, text/x-magento-init, text/x-shopify-app, etc.), navigate auto-runs `extract()` and returns the result as the `extract` field. Saves a round trip on the common case where the data the JS would have rendered is already sitting in the HTML — JSON-LD article schemas on news sites, __NEXT_DATA__ page state on Next.js apps, json_in_script product blobs on Magento/Shopify, GitHub RSC payloads, etc. Capped at 256 KB inline; over that limit `extract` returns a stub with strategy/confidence/size_bytes/hint and the agent should call `extract()` explicitly to retrieve the full payload. Pages with no embedded JSON get extract:null and pay zero extra cost.\n\nTool advice: navigate also returns `tool_likelihoods` plus `tool_recommendations`, derived from concrete page signals (structure/headings, selector hints, density, embedded data, network captures, challenge state, and script pathology) so agents can pick the next tool without guessing.\n\nAuto-solve: Reddit's JS proof-of-work challenge (provider: reddit_js_challenge) is transparently solved — the challenge is detected, the GET solution URL is computed (solution = hex_value + hex_value), and the real page is returned in one navigate call. challenge:null on the result means the real page was served. Subsequent navigations in the same session carry the clearance cookie and skip the challenge entirely.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3900,6 +4217,7 @@ mod outcome_tests {
 
     use super::{
         BLOCKMAP_MIN_STRUCTURE, EXTRACT_OBJECT_MIN_KEYS, TIEBREAKER_MIN_TITLE_LEN, derive_outcome,
+        derive_tool_likelihoods,
     };
     use serde_json::{Value, json};
 
@@ -4188,6 +4506,136 @@ mod outcome_tests {
                 .iter()
                 .any(|r| r.starts_with("scripts_pathological:"))
         );
+    }
+
+    #[test]
+    fn tool_likelihoods_selector_rich_page_prefers_query_text() {
+        let blockmap = json!({
+            "title": "BBC News",
+            "structure": [
+                {"role": "header", "ref": "e:1", "counts": {"links": 20, "buttons": 2, "inputs": 1}},
+                {"role": "main", "ref": "e:2", "counts": {"links": 58, "buttons": 4, "inputs": 2}},
+                {"role": "section", "ref": "e:3", "counts": {"links": 12, "buttons": 0, "inputs": 0}},
+                {"role": "footer", "ref": "e:4", "counts": {"links": 8, "buttons": 0, "inputs": 0}},
+            ],
+            "headings": [
+                {"level": 1, "ref": "e:10", "text": "News"},
+                {"level": 2, "ref": "e:11", "text": "Top story"},
+                {"level": 2, "ref": "e:12", "text": "Also in news"}
+            ],
+            "main_headings": [
+                {"level": 1, "ref": "e:10", "text": "News"},
+                {"level": 2, "ref": "e:11", "text": "Top story"},
+                {"level": 2, "ref": "e:12", "text": "Also in news"}
+            ],
+            "selectors": {"data_testid": 120, "aria_label": 40, "role": 5},
+            "interactives": {"links": 98, "buttons": 6, "inputs": [], "forms": []},
+            "density": {"tables": null, "td": null, "li": null, "json_scripts": 1, "thin_shell": false, "likely_js_filled": false},
+        });
+        let extract = json!({
+            "strategy": "next_data",
+            "confidence": 0.97,
+            "data": {"headline": "Top story"},
+        });
+        let network = json!({"count": 0, "total_bytes": 0, "top": []});
+        let scripts =
+            json!({"inline_count": 3, "external_count": 2, "executed": 5, "interrupted": 0});
+
+        let advice = derive_tool_likelihoods(
+            200,
+            false,
+            &blockmap,
+            &extract,
+            &network,
+            &Value::Null,
+            &scripts,
+        );
+
+        let recs = advice
+            .get("tool_recommendations")
+            .and_then(|v| v.as_array())
+            .expect("tool_recommendations array");
+        assert_eq!(recs[0].as_str(), Some("query_text"));
+        assert!(
+            advice
+                .get("tool_likelihoods")
+                .and_then(|v| v.get("query_text"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0)
+                > advice
+                    .get("tool_likelihoods")
+                    .and_then(|v| v.get("query"))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0)
+        );
+    }
+
+    #[test]
+    fn tool_likelihoods_data_page_prefers_extract() {
+        let blockmap = json!({
+            "title": "Home - Financial Times",
+            "structure": [{"role": "main", "ref": "e:2", "counts": {"links": 6, "buttons": 1, "inputs": 0}}],
+            "headings": [],
+            "main_headings": [],
+            "selectors": {"data_testid": 0, "aria_label": 0, "role": 0},
+            "interactives": {"links": 6, "buttons": 1, "inputs": [], "forms": []},
+            "density": {"tables": null, "td": null, "li": null, "json_scripts": 6, "thin_shell": false, "likely_js_filled": false},
+        });
+        let extract = json!({
+            "strategy": "json_ld",
+            "confidence": 0.95,
+            "data": {"@context": "https://schema.org", "@type": "WebSite", "name": "FT"},
+        });
+        let network = json!({"count": 2, "total_bytes": 18244, "top": []});
+        let scripts =
+            json!({"inline_count": 0, "external_count": 0, "executed": 0, "interrupted": 0});
+
+        let advice = derive_tool_likelihoods(
+            200,
+            false,
+            &blockmap,
+            &extract,
+            &network,
+            &Value::Null,
+            &scripts,
+        );
+
+        let recs = advice
+            .get("tool_recommendations")
+            .and_then(|v| v.as_array())
+            .expect("tool_recommendations array");
+        assert_eq!(recs[0].as_str(), Some("extract"));
+    }
+
+    #[test]
+    fn tool_likelihoods_thin_shell_prefers_chrome() {
+        let blockmap = json!({
+            "title": "Loading...",
+            "structure": [],
+            "headings": [],
+            "main_headings": [],
+            "selectors": {"data_testid": 0, "aria_label": 0, "role": 0},
+            "interactives": {"links": 0, "buttons": 0, "inputs": [], "forms": []},
+            "density": {"tables": null, "td": null, "li": null, "json_scripts": 0, "thin_shell": true, "likely_js_filled": true},
+        });
+        let scripts =
+            json!({"inline_count": 2, "external_count": 4, "executed": 1, "interrupted": 5});
+
+        let advice = derive_tool_likelihoods(
+            200,
+            true,
+            &blockmap,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &scripts,
+        );
+
+        let recs = advice
+            .get("tool_recommendations")
+            .and_then(|v| v.as_array())
+            .expect("tool_recommendations array");
+        assert_eq!(recs[0].as_str(), Some("chrome_escalation"));
     }
 }
 
