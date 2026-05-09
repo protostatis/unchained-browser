@@ -117,6 +117,16 @@ EOF
 
 `navigate` returns `{status, url, bytes, blockmap, challenge}`. The `blockmap` is your one-shot orientation payload — use it to plan queries before pulling raw HTML.
 
+## Quick start (one-shot CLI)
+
+For shell-friendly single requests, use the convenience subcommand:
+
+```bash
+unbrowser navigate https://news.ycombinator.com --json
+```
+
+That prints one JSON result and exits. Use the RPC mode above when you need a persistent session.
+
 ## Quick start (Python)
 
 ```python
@@ -148,6 +158,16 @@ These are the methods the agent will use on every task:
 - `type {ref, text}` — set value, fire `input` + `change`.
 - `submit {ref}` — gather GET-form fields, navigate to action URL.
 - `close` — exit.
+
+## Tool hints
+
+`navigate` also returns `tool_likelihoods` and `tool_recommendations`. Use them as a ranking, not a mandate:
+
+- Start with the highest-ranked suggestion that still matches the task.
+- Prefer `query_text` / `query` when the page has stable visible labels or selector hints.
+- Prefer `text_main` when the task is reading article/docs content.
+- Prefer `extract`, `extract_list`, or `extract_table` when the page exposes structured data.
+- If `chrome_escalation` is near the top, stop guessing and escalate instead of burning calls.
 
 ## RPC methods — advanced (use sparingly)
 

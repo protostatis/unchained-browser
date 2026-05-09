@@ -98,7 +98,7 @@ with Client() as ub:
 <details>
 <summary>Bare-RPC version (if you can't use Python)</summary>
 
-The same demo without the wrapper — useful for languages other than Python or one-shot bash calls. The protocol is JSON-RPC over stdin/stdout, one JSON object per line:
+The same demo without the wrapper — useful for languages other than Python or multi-step sessions. The protocol is JSON-RPC over stdin/stdout, one JSON object per line:
 
 ```python
 import subprocess, json
@@ -119,6 +119,16 @@ for s in call("query", selector=".titleline > a")[:3]:
 That's the entire protocol surface. Same shape from any language with subprocess + JSON.
 
 </details>
+
+### One-shot CLI
+
+For shell-friendly calls, use the convenience subcommand:
+
+```bash
+unbrowser navigate https://news.ycombinator.com --json
+```
+
+That prints one JSON result and exits. Use JSON-RPC only when you need a persistent session.
 
 ## SPA tier — what works, what doesn't
 
