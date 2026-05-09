@@ -154,8 +154,9 @@ jobs:
 
       - name: Install build deps
         run: |
+          export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          apt-get install -y ca-certificates cmake curl git build-essential ninja-build pkg-config
+          apt-get install -yq --no-install-recommends ca-certificates cmake curl git build-essential ninja-build pkg-config
 
       - name: Install Rust toolchain
         run: |
