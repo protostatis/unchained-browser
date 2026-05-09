@@ -39,7 +39,8 @@ jobs:
                                  # Rosetta on the arm64 runner.
             wheel_platform: macosx_10_12_x86_64
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-20.04     # pin: glibc 2.31 — runs on AL2023 (2.34) and Ubuntu 20.04+
+            os: ubuntu-latest    # host runner only; build happens in manylinux_2_31 container
+            container: quay.io/pypa/manylinux_2_31_x86_64
             wheel_platform: manylinux_2_31_x86_64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm  # GitHub native ARM64 runner — covers Graviton2/3/4
@@ -67,10 +68,15 @@ jobs:
           # arm64 and x64; cargo --target handles the rest.
 
       - name: Install build deps (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build
+
+      - name: Install build deps (manylinux)
+        if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          yum install -y cmake ninja-build
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
