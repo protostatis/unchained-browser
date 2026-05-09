@@ -263,8 +263,8 @@ jobs:
     name: Publish to PyPI
     needs: [build, build-x86_64-unknown-linux-gnu, build-sdist]
     runs-on: ubuntu-latest
-    # Only publish on tag pushes (skip workflow_dispatch test runs).
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Publish on tag pushes and explicit manual release dispatches.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     permissions:
       id-token: write   # required for OIDC trusted publishing
     environment:
@@ -333,7 +333,7 @@ jobs:
             ### One-liner (macOS / Linux):
 
             ```bash
-            curl -L https://github.com/protostatis/unbrowser/releases/download/${{ github.ref_name }}/unbrowser-$(uname -m | sed 's/arm64/aarch64/')-$(uname -s | tr A-Z a-z | sed 's/darwin/apple-darwin/;s/linux/unknown-linux-gnu/').tar.gz \
+            curl -L https://github.com/protostatis/unbrowser/releases/download/${{ github.event.inputs.tag || github.ref_name }}/unbrowser-$(uname -m | sed 's/arm64/aarch64/')-$(uname -s | tr A-Z a-z | sed 's/darwin/apple-darwin/;s/linux/unknown-linux-gnu/').tar.gz \
               | tar xz -C /usr/local/bin
             unbrowser --mcp
             ```
