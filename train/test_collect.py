@@ -134,6 +134,17 @@ class CollectSmokeTest(unittest.TestCase):
             self.assertIn("expected_tool", case)
             self.assertIn(case["expected_tool"], allowed)
 
+    def test_subagent_task_corpus_loads(self):
+        corpus = REPO / "train" / "corpus" / "subagent_tasks.json"
+        self.assertTrue(corpus.exists(), msg=f"missing subagent task corpus at {corpus}")
+        tasks = json.loads(corpus.read_text())
+        self.assertGreaterEqual(len(tasks), 4)
+        for task in tasks:
+            self.assertIn("url", task)
+            self.assertIn("task", task)
+            self.assertIn("expected_answer", task)
+            self.assertIn(task.get("match", "exact"), {"exact", "contains"})
+
 
 if __name__ == "__main__":
     unittest.main()

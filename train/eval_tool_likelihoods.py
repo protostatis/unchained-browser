@@ -13,7 +13,6 @@ import argparse
 import json
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -49,6 +48,16 @@ def _rpc_run(binary: Path, url: str) -> dict:
     raise RuntimeError(f"no navigate result returned by {binary}")
 
 
+def validate_result_shape(result: dict, binary: Path) -> None:
+    recs = result.get("tool_recommendations")
+    probs = result.get("tool_likelihoods")
+    if not isinstance(recs, list) or not isinstance(probs, dict):
+        raise RuntimeError(
+            f"{binary} does not emit tool ranking fields; "
+            "build the matching release before running this eval"
+        )
+
+
 def top_tool(result: dict) -> str | None:
     recs = result.get("tool_recommendations") or []
     if isinstance(recs, list) and recs:
@@ -78,6 +87,7 @@ def run(binary: Path, cases: list[dict]) -> dict:
     rows = []
     for case in cases:
         result = _rpc_run(binary, case["url"])
+        validate_result_shape(result, binary)
         predicted = top_tool(result)
         expected = case.get("expected_tool")
         ok = predicted == expected

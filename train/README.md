@@ -152,6 +152,19 @@ python3 train/eval_tool_likelihoods.py \
 
 The corpus intentionally stays tiny and concrete: SSR list page, selector-rich news page, and two data-heavy pages.
 
+## Subagent task eval
+
+Task-completion benchmark for comparing a hinted binary (emits `tool_*`) against a no-hint binary such as obscura.
+
+```bash
+python3 train/eval_subagent_tasks.py \
+  --hinted-results hinted.jsonl \
+  --nohint-results nohint.jsonl
+```
+
+Each results file should contain one JSON object per task with `task_id`, `success`, `answer`, `steps`, and `elapsed_ms`.
+The corpus lives in `train/corpus/subagent_tasks.json`.
+
 ## Tests
 
 ```bash
