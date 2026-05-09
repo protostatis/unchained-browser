@@ -54,7 +54,7 @@
   }
 
   function countSelector(root, selector) {
-    if (!root) return 0;
+    if (!root || !selector || !selector.trim()) return 0;
     try {
       return root.querySelectorAll(selector).length;
     } catch (e) {
@@ -130,8 +130,9 @@
     }
 
     // Stable selector hints are concrete, page-local signals that help agents
-    // choose between CSS querying and text/extract fallbacks.
-    var contentRoot = document.querySelector('main, [role="main"], article') || body;
+    // choose between CSS querying and text/extract fallbacks. `role` here is
+    // explicit only; HTML's implicit semantic roles are not counted.
+    var contentRoot = document.querySelector('main, [role="main"], article, #root, #app') || body;
     var selectors = {
       data_testid: countSelector(contentRoot, '[data-testid]'),
       aria_label: countSelector(contentRoot, '[aria-label]'),

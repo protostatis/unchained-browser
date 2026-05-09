@@ -2722,7 +2722,10 @@ fn derive_outcome(
         .get("truncated")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
-        || extract.get("primary_truncated").is_some();
+        || extract
+            .get("primary_truncated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
     // Blockmap: structure count + total interactives across the structure.
     // Iterate over an empty slice on missing/malformed structure rather than
@@ -3180,6 +3183,8 @@ fn derive_tool_likelihoods(
             .get("external_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+    // Safe because the division only happens when `scripts_total > 0`.
+    debug_assert!(!exec_scripts || scripts_total > 0);
     let script_pathology = if exec_scripts && scripts_total > 0 {
         scripts_interrupted as f64 / scripts_total as f64
     } else {
