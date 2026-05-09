@@ -160,10 +160,16 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
+          export HOME=/root
+          export CARGO_HOME=/root/.cargo
+          export RUSTUP_HOME=/root/.rustup
           if ! command -v rustup >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail https://sh.rustup.rs | sh -s -- --default-toolchain none -y
           fi
-          export PATH="$HOME/.cargo/bin:$PATH"
+          export PATH="$CARGO_HOME/bin:$PATH"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          echo "CARGO_HOME=$CARGO_HOME" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$RUSTUP_HOME" >> "$GITHUB_ENV"
           rustup toolchain install stable --target x86_64-unknown-linux-gnu --profile minimal --no-self-update
           rustup default stable
 
@@ -206,10 +212,10 @@ jobs:
           python -m pip install --upgrade pip build wheel
           cd python && python -m build --wheel
 
-      - name: Re-tag wheel for manylinux_2_28_x86_64
+      - name: Re-tag wheel for manylinux_2_31_x86_64
         run: |
           cd python/dist
-          python -m wheel tags --remove --platform-tag manylinux_2_28_x86_64 pyunbrowser-*-py3-none-any.whl
+          python -m wheel tags --remove --platform-tag manylinux_2_31_x86_64 pyunbrowser-*-py3-none-any.whl
           ls -la
 
       - name: Upload artifact
