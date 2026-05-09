@@ -204,12 +204,18 @@ jobs:
 
       - name: Build wheel
         run: |
-          python3 -m pip install --upgrade pip build wheel
+          python3 -m pip install --upgrade pip build 'wheel>=0.40.0'
           cd python && python3 -m build --wheel
 
       - name: Re-tag wheel for manylinux_2_31_x86_64
+        # Hatchling emits py3-none-any because the Python code itself is pure
+        # Python; we retag only the platform because the wheel bundles the
+        # native binary in unbrowser/_bin/.
         run: |
           cd python/dist
+          # `--remove` strips the original platform tag before we add the real
+          # Linux target. `wheel tags` is required here because the package is
+          # not an extension module, just a Python wrapper around a binary.
           python3 -m wheel tags --remove --platform-tag manylinux_2_31_x86_64 pyunbrowser-*-py3-none-any.whl
           ls -la
 
