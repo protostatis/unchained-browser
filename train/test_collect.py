@@ -119,6 +119,21 @@ class CollectSmokeTest(unittest.TestCase):
             self.assertGreaterEqual(cats[cat], 10,
                                     msg=f"category {cat} has only {cats[cat]} entries")
 
+    def test_ab_eval_corpus_loads(self):
+        ab = REPO / "train" / "corpus" / "tool_likelihoods_ab.json"
+        self.assertTrue(ab.exists(), msg=f"missing A/B eval corpus at {ab}")
+        cases = json.loads(ab.read_text())
+        self.assertGreaterEqual(len(cases), 4)
+        allowed = {
+            "query", "query_text", "text_main", "extract", "extract_table",
+            "extract_list", "network_stores", "click", "type", "submit",
+            "chrome_escalation",
+        }
+        for case in cases:
+            self.assertIn("url", case)
+            self.assertIn("expected_tool", case)
+            self.assertIn(case["expected_tool"], allowed)
+
 
 if __name__ == "__main__":
     unittest.main()

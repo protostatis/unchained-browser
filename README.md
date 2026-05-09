@@ -211,7 +211,7 @@ unbrowser 2> >(python3 scripts/watch.py)
 
 | | |
 |---|---|
-| `navigate {url}` | fetch + parse + return `{status, url, bytes, headers, blockmap, challenge, tool_likelihoods, tool_recommendations}` |
+| `navigate {url}` | fetch + parse + return `{status, url, bytes, headers, blockmap, challenge, tool_confidence, tool_margin, tool_likelihoods, tool_recommendations}` |
 | `query {selector}` | CSS query → `[{ref, tag, attrs, text}]` |
 | `text {selector?}` | textContent of FIRST match (default `body`). On Wikipedia/MDN/news sites the first `<p>` is often a hatnote — prefer `text_main` for article body. |
 | `text_main` | textContent of `<main>` / `[role=main]` / single `<article>` / longest non-chrome subtree. Use this for reading article/docs/blog content. |

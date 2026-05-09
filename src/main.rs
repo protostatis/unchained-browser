@@ -1755,6 +1755,8 @@ impl Session {
             "scripts": scripts,
             "extract": auto_extract,
             "network_stores": network_stores,
+            "tool_confidence": tool_advice.get("confidence").cloned().unwrap_or(Value::Null),
+            "tool_margin": tool_advice.get("margin").cloned().unwrap_or(Value::Null),
             "tool_likelihoods": tool_advice.get("tool_likelihoods").cloned().unwrap_or(Value::Null),
             "tool_recommendations": tool_advice.get("tool_recommendations").cloned().unwrap_or(Value::Null),
         }))
@@ -3002,9 +3004,9 @@ fn build_signals(
     })
 }
 
-fn score_to_probabilities(mut scores: Vec<(&'static str, f64)>) -> Value {
+fn score_to_probabilities(mut scores: Vec<(&'static str, f64)>) -> (Value, f64, f64) {
     if scores.is_empty() {
-        return Value::Object(serde_json::Map::new());
+        return (Value::Object(serde_json::Map::new()), 0.0, 0.0);
     }
 
     let max_score = scores
@@ -3018,13 +3020,19 @@ fn score_to_probabilities(mut scores: Vec<(&'static str, f64)>) -> Value {
     }
 
     let mut map = serde_json::Map::new();
+    let mut top_prob = 0.0;
+    let mut second_prob = 0.0;
     for (name, score) in scores {
-        map.insert(
-            name.to_string(),
-            Value::from(if total > 0.0 { score / total } else { 0.0 }),
-        );
+        let prob = if total > 0.0 { score / total } else { 0.0 };
+        if prob > top_prob {
+            second_prob = top_prob;
+            top_prob = prob;
+        } else if prob > second_prob {
+            second_prob = prob;
+        }
+        map.insert(name.to_string(), Value::from(prob));
     }
-    Value::Object(map)
+    (Value::Object(map), top_prob, (top_prob - second_prob).max(0.0))
 }
 
 fn normalized_count(count: u64, scale: f64) -> f64 {
@@ -3308,9 +3316,12 @@ fn derive_tool_likelihoods(
 
     let mut top = ordered.clone();
     top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let (tool_likelihoods, confidence, margin) = score_to_probabilities(ordered);
 
     json!({
-        "tool_likelihoods": score_to_probabilities(ordered),
+        "confidence": confidence,
+        "margin": margin,
+        "tool_likelihoods": tool_likelihoods,
         "tool_recommendations": top.into_iter().map(|(name, _)| name).collect::<Vec<_>>(),
     })
 }
@@ -4661,12 +4672,30 @@ mod outcome_tests {
             .get("tool_likelihoods")
             .and_then(|v| v.as_object())
             .expect("tool_likelihoods object");
-        let sum: f64 = probs.values().map(|v| v.as_f64().unwrap_or(f64::NAN)).sum();
+        let sum: f64 = probs
+            .iter()
+            .filter(|(k, _)| k.as_str() != "confidence" && k.as_str() != "margin")
+            .map(|(_, v)| v.as_f64().unwrap_or(f64::NAN))
+            .sum();
         assert!(sum.is_finite());
         assert!((sum - 1.0).abs() < 1e-9);
         for value in probs.values() {
             assert!(value.as_f64().unwrap_or(f64::NAN).is_finite());
         }
+        assert!(
+            advice
+                .get("confidence")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(f64::NAN)
+                .is_finite()
+        );
+        assert!(
+            advice
+                .get("margin")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(f64::NAN)
+                .is_finite()
+        );
         assert_eq!(
             advice
                 .get("tool_recommendations")

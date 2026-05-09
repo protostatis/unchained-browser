@@ -55,7 +55,11 @@
 
   function countSelector(root, selector) {
     if (!root) return 0;
-    return root.querySelectorAll(selector).length;
+    try {
+      return root.querySelectorAll(selector).length;
+    } catch (e) {
+      return 0;
+    }
   }
 
   globalThis.__blockmap = function() {
