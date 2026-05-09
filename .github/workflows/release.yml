@@ -38,10 +38,6 @@ jobs:
                                  # Smoke test runs the x86_64 binary via
                                  # Rosetta on the arm64 runner.
             wheel_platform: macosx_10_12_x86_64
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest    # host runner only; build happens in manylinux_2_31 container
-            container: quay.io/pypa/manylinux_2_31_x86_64
-            wheel_platform: manylinux_2_31_x86_64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm  # GitHub native ARM64 runner — covers Graviton2/3/4
             wheel_platform: manylinux_2_35_aarch64
@@ -149,6 +145,90 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-x86_64-unknown-linux-gnu:
+    name: Build x86_64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_31_x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-gnu
+
+      # manylinux images vary slightly; use whichever package manager exists.
+      - name: Install build deps
+        run: |
+          if ! command -v cmake >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1; then
+            if command -v dnf >/dev/null 2>&1; then
+              dnf install -y cmake ninja-build
+            elif command -v yum >/dev/null 2>&1; then
+              yum install -y cmake ninja-build
+            elif command -v microdnf >/dev/null 2>&1; then
+              microdnf install -y cmake ninja-build
+            else
+              echo "no package manager found for cmake/ninja" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Smoke test (Unix)
+        run: |
+          echo '{"id":1,"method":"close"}' | ./target/x86_64-unknown-linux-gnu/release/unbrowser > /tmp/out
+          cat /tmp/out
+          grep -q '"result":"bye"' /tmp/out
+
+      - name: Package archive
+        run: |
+          cd target/x86_64-unknown-linux-gnu/release
+          tar -czf ../../../unbrowser-x86_64-unknown-linux-gnu.tar.gz unbrowser
+
+      - name: Compute checksum
+        run: |
+          sha256sum unbrowser-x86_64-unknown-linux-gnu.tar.gz > unbrowser-x86_64-unknown-linux-gnu.tar.gz.sha256
+          cat unbrowser-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Bundle binary into Python package
+        run: |
+          cp target/x86_64-unknown-linux-gnu/release/unbrowser python/unbrowser/_bin/unbrowser
+          chmod +x python/unbrowser/_bin/unbrowser
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build wheel
+          cd python && python -m build --wheel
+
+      - name: Re-tag wheel for manylinux_2_31_x86_64
+        run: |
+          cd python/dist
+          python -m wheel tags --remove --platform-tag manylinux_2_31_x86_64 pyunbrowser-*-py3-none-any.whl
+          ls -la
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: unbrowser-x86_64-unknown-linux-gnu
+          path: |
+            unbrowser-x86_64-unknown-linux-gnu.tar.gz
+            unbrowser-x86_64-unknown-linux-gnu.tar.gz.sha256
+            python/dist/pyunbrowser-*.whl
+          if-no-files-found: error
+          retention-days: 7
+
   # Source distribution. Platform-neutral, no binary inside — lets users
   # on platforms we don't ship a wheel for build from source themselves
   # (and PyPI strongly prefers an sdist alongside any binary wheels).
@@ -186,7 +266,7 @@ jobs:
   #   Environment name: pypi   (must match the `environment:` field below)
   publish-pypi:
     name: Publish to PyPI
-    needs: [build, build-sdist]
+    needs: [build, build-x86_64-unknown-linux-gnu, build-sdist]
     runs-on: ubuntu-latest
     # Only publish on tag pushes (skip workflow_dispatch test runs).
     if: startsWith(github.ref, 'refs/tags/v')
@@ -218,7 +298,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: build
+    needs: [build, build-x86_64-unknown-linux-gnu]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
