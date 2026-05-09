@@ -156,7 +156,7 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          apt-get install -yq --no-install-recommends ca-certificates cmake curl git build-essential ninja-build pkg-config clang libclang-dev
+          apt-get install -yq --no-install-recommends ca-certificates cmake curl git build-essential ninja-build pkg-config clang libclang-dev python3 python3-pip python3-venv
 
       - name: Install Rust toolchain
         run: |
@@ -197,11 +197,6 @@ jobs:
           sha256sum unbrowser-x86_64-unknown-linux-gnu.tar.gz > unbrowser-x86_64-unknown-linux-gnu.tar.gz.sha256
           cat unbrowser-x86_64-unknown-linux-gnu.tar.gz.sha256
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
       - name: Bundle binary into Python package
         run: |
           cp target/x86_64-unknown-linux-gnu/release/unbrowser python/unbrowser/_bin/unbrowser
@@ -209,13 +204,13 @@ jobs:
 
       - name: Build wheel
         run: |
-          python -m pip install --upgrade pip build wheel
-          cd python && python -m build --wheel
+          python3 -m pip install --upgrade pip build wheel
+          cd python && python3 -m build --wheel
 
       - name: Re-tag wheel for manylinux_2_31_x86_64
         run: |
           cd python/dist
-          python -m wheel tags --remove --platform-tag manylinux_2_31_x86_64 pyunbrowser-*-py3-none-any.whl
+          python3 -m wheel tags --remove --platform-tag manylinux_2_31_x86_64 pyunbrowser-*-py3-none-any.whl
           ls -la
 
       - name: Upload artifact
