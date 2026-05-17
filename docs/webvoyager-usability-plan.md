@@ -1,14 +1,19 @@
 # WebVoyager usability improvement plan
 
-Distributed implementation plan for improving `unbrowser` usability against a
-fixed WebVoyager-style task set. The goal is to split the work into independent
-subagent branches, merge them into one integration PR, then rerun and score the
-same task corpus.
+Distributed implementation plan for improving `unbrowser` usability against
+fixed WebVoyager-style task corpora. The goal is to split the work into
+independent subagent branches, merge them into one integration PR, then rerun and
+score the same corpora.
 
 ## Baseline run
 
 Sixteen read-only WebVoyager tasks were run with subagents using only
 `target/release/unbrowser` over JSON-RPC.
+
+This first run is a fast regression baseline, not full benchmark-site coverage:
+it covers 9 of the 15 unique WebVoyager sites. The all-site coverage corpus below
+adds one representative task for every unique site in the upstream 643-task
+dataset.
 
 Raw per-task baseline records are checked in at
 `docs/webvoyager-baseline-v1-2026-05-16.jsonl`. The file intentionally stores the
@@ -18,6 +23,9 @@ diff task outcomes, timings, signals, and friction counters mechanically.
 Baseline artifact naming uses `webvoyager-baseline-v{N}-YYYY-MM-DD.jsonl` so a
 single current baseline version can be referenced while older baselines remain
 auditable.
+
+The all-site coverage seed is checked in at
+`docs/webvoyager-site-coverage-v1.jsonl`.
 
 | Metric | Baseline |
 |---|---:|
@@ -58,7 +66,7 @@ Successful tasks:
 5. Surface rate-limit metadata and retry hints.
 6. Make BlockMap interactive fields expandable, not just counts.
 7. Improve repeated card/list extraction.
-8. Record WebVoyager task runs as JSONL and score future builds consistently.
+8. Record WebVoyager task runs as JSONL and score future builds consistently across the fast-regression and all-site corpora.
 
 ## Branch and worktree setup
 
@@ -81,7 +89,7 @@ git worktree add ../ub-agent-eval -b agent/webvoyager-eval
 | B: Text tools | 2, 3 | `src/main.rs`, `src/js/extract.js`, `README.md` | `find_text`, `text_around`, cleaner content modes, RPC/MCP docs. |
 | C: Cards/lists | 7 | `src/js/extract.js`, `src/main.rs` if needed | Cleaner `extract_list`, optional `extract_cards` / auto-card helper, dedupe/noise stripping. |
 | D: Challenge/rate-limit | 4, 5 | `src/challenge.rs`, `src/main.rs`, `scripts/router.py`, `scripts/watch.py` | First-class `rate_limited` / `429` metadata, better AWS WAF router/watch behavior. |
-| E: Eval runner | 8 | `train/corpus/*`, `train/*.py`, `train/README.md` | Fixed 16-task corpus, JSONL result schema, scorer comparing baseline vs candidate. |
+| E: Eval runner | 8 | `train/corpus/*`, `train/*.py`, `train/README.md` | Fixed fast-regression and all-site corpora, JSONL result schema, scorer comparing baseline vs candidate. |
 | Integrator | All | All touched docs/tests | Merge branches, resolve API naming, run full score, open one implementation PR. |
 
 Suggested timeboxes:
@@ -93,7 +101,7 @@ Suggested timeboxes:
 | C: Cards/lists | 60 min | Synthetic card/list smoke test proves cleaned titles/snippets. |
 | D: Challenge/rate-limit | 60 min | Unit tests cover `429` and AWS WAF metadata/watch output. |
 | E: Eval runner | 90 min | Runner can emit JSONL using the shared schema below. |
-| Integrator | 120 min | All branches merged, validation run, 16-task rerun scored. |
+| Integrator | 120 min | All branches merged, validation run, fast-regression and all-site reruns scored. |
 
 If a subagent hits its budget before finishing, it should stop with a short
 handoff note covering what landed, what failed, and the smallest remaining next
@@ -194,7 +202,7 @@ Allowed `handling` values:
 3. Merge Agent D third. Challenge/rate-limit behavior is mostly independent, and it should land before Agent B so text/search helpers can consume accurate `rate_limit` and challenge metadata instead of encoding their own retry heuristics.
 4. Merge Agent B fourth. It wires final RPC/MCP API names and docs after A/C settle, and after D defines the final retry/escalation signals.
 5. Merge Agent E fifth. The scorer/corpus should target the final result schema.
-6. Integrator runs full tests, reruns the 16 tasks, commits final docs, and opens one implementation PR from `feature/webvoyager-usability`.
+6. Integrator runs full tests, reruns both fixed corpora, commits final docs, and opens one implementation PR from `feature/webvoyager-usability`.
 
 ## Validation
 
@@ -210,9 +218,17 @@ Subagents should add local smoke scripts when useful, following the existing
 `scripts/*_smoke.py` pattern with a local HTTP server instead of live network
 dependencies.
 
-## Fixed rerun corpus
+## Fixed rerun corpora
 
-Use the same tasks for baseline and candidate scoring:
+Use the same tasks for baseline and candidate scoring. There are two required
+tiers:
+
+| Tier | Purpose | Artifact |
+|---|---|---|
+| Fast regression | Fast, previously observed 16-task set for no-regression checks. | `docs/webvoyager-baseline-v1-2026-05-16.jsonl` |
+| All-site coverage | One representative read-only task for every unique WebVoyager site. | `docs/webvoyager-site-coverage-v1.jsonl` |
+
+The fast-regression tier is:
 
 | Task | Start URL | Expected handling |
 |---|---|---|
@@ -232,6 +248,31 @@ Use the same tasks for baseline and candidate scoring:
 | `GitHub--37` | `https://github.com/` | Answer. |
 | `Coursera--37` | `https://www.coursera.org/` | Answer. |
 | `ESPN--18` | `https://www.espn.com/` | Correctly route `aws_waf`. |
+
+The all-site tier covers every unique site in upstream WebVoyager:
+
+| Site | Task | Start URL | Expected handling |
+|---|---|---|---|
+| Allrecipes | `Allrecipes--40` | `https://www.allrecipes.com/` | Answer. |
+| Amazon | `Amazon--0` | `https://www.amazon.com/` | Challenge route or answer with valid clearance. |
+| Apple | `Apple--6` | `https://www.apple.com/` | Answer. |
+| ArXiv | `ArXiv--27` | `https://arxiv.org/` | Answer. |
+| BBC News | `BBC News--5` | `https://www.bbc.com/news/` | Answer. |
+| Booking | `Booking--0` | `https://www.booking.com/` | Challenge route or answer with valid clearance. |
+| Cambridge Dictionary | `Cambridge Dictionary--0` | `https://dictionary.cambridge.org/` | Answer. |
+| Coursera | `Coursera--37` | `https://www.coursera.org/` | Answer. |
+| ESPN | `ESPN--18` | `https://www.espn.com/` | Challenge route or answer with valid clearance. |
+| GitHub | `GitHub--37` | `https://github.com/` | Answer. |
+| Google Flights | `Google Flights--0` | `https://www.google.com/travel/flights/` | Answer or route to browser if rendered/search UI is unavailable. |
+| Google Map | `Google Map--0` | `https://www.google.com/maps/` | Answer or route to browser if rendered/map UI is unavailable. |
+| Google Search | `Google Search--0` | `https://www.google.com/` | Answer or route challenge/rate limit. |
+| Huggingface | `Huggingface--0` | `https://huggingface.co/` | Answer. |
+| Wolfram Alpha | `Wolfram Alpha--0` | `https://www.wolframalpha.com/` | Answer or route to browser if rendered result UI is unavailable. |
+
+The full upstream corpus has 643 tasks across these 15 sites. Running all 643 is
+out of scope for the first implementation PR, but the eval runner should not bake
+in the 16-task assumption; it should accept arbitrary JSONL corpora so a full
+benchmark pass can be added later.
 
 ## Scoring
 
@@ -259,4 +300,6 @@ Candidate acceptance targets:
 - No regressions on the 11 successful baseline tasks.
 - Preserve `3 / 3` correct `aws_waf` routing.
 - Improve `ArXiv--0` from `unknown_block` to clean `rate_limited` handling, or complete it if possible without unsafe retrying.
+- Execute all 15 sites in `docs/webvoyager-site-coverage-v1.jsonl` and report answer success plus handled success by site.
+- Do not silently skip any benchmark site; a challenge, rate limit, browser-route decision, or site-drift classification is a valid handled outcome, but a missing site is not.
 - Reduce friction counters, especially `eval_used`, `body_used`, `manual_url_guess`, `noisy_text`, and `form_confusion`.
