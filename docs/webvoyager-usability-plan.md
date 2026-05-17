@@ -10,6 +10,11 @@ same task corpus.
 Sixteen read-only WebVoyager tasks were run with subagents using only
 `target/release/unbrowser` over JSON-RPC.
 
+Raw per-task baseline records are checked in at
+`docs/webvoyager-baseline-2026-05-16.jsonl`. The file intentionally stores the
+subagent result summaries in JSONL rather than prose so future candidate runs can
+diff task outcomes, timings, signals, and friction counters mechanically.
+
 | Metric | Baseline |
 |---|---:|
 | Answer success | 11 / 16 |
@@ -75,6 +80,21 @@ git worktree add ../ub-agent-eval -b agent/webvoyager-eval
 | E: Eval runner | 8 | `train/corpus/*`, `train/*.py`, `train/README.md` | Fixed 16-task corpus, JSONL result schema, scorer comparing baseline vs candidate. |
 | Integrator | All | All touched docs/tests | Merge branches, resolve API naming, run full score, open one implementation PR. |
 
+Suggested timeboxes:
+
+| Agent | Budget | Stop condition |
+|---|---:|---|
+| A: BlockMap/forms | 90 min | Smoke test demonstrates richer form summaries on a synthetic page. |
+| B: Text tools | 90 min | RPC/MCP exposes localized text extraction and docs describe it. |
+| C: Cards/lists | 60 min | Synthetic card/list smoke test proves cleaned titles/snippets. |
+| D: Challenge/rate-limit | 60 min | Unit tests cover `429` and AWS WAF metadata/watch output. |
+| E: Eval runner | 90 min | Runner can emit JSONL using the shared schema below. |
+| Integrator | 120 min | All branches merged, validation run, 16-task rerun scored. |
+
+If a subagent hits its budget before finishing, it should stop with a short
+handoff note covering what landed, what failed, and the smallest remaining next
+step. This prevents the distributed run from drifting into open-ended research.
+
 ## Shared API contract
 
 Keep existing fields backward-compatible wherever possible.
@@ -113,12 +133,61 @@ List extraction additions:
 | `extract_list` text cleanup | Ignore `script`, `style`, `noscript`; collapse whitespace; remove image fallback artifacts. |
 | Card helper | Prefer common card/article/product/course selectors and return title/url/snippet/image/meta where available. |
 
+## Shared result schema
+
+All subagents and the eval runner should emit one JSON object per task with this
+shape. Extra fields are allowed, but these keys must stay stable so scoring can
+be automated.
+
+```json
+{
+  "task_id": "ArXiv--17",
+  "web_name": "ArXiv",
+  "start_url": "https://arxiv.org/",
+  "question": "Find the paper 'GPT-4 Technical Report', when was v3 submitted?",
+  "success": true,
+  "handled_success": true,
+  "handling": "answered",
+  "answer": "Mon, 27 Mar 2023 17:46:54 UTC",
+  "confidence": "high",
+  "steps": 15,
+  "elapsed_ms": 90000,
+  "unbrowser_signals": {
+    "statuses": [200],
+    "challenge_provider": null,
+    "likely_js_filled": false,
+    "rate_limit": null
+  },
+  "friction": {
+    "eval_used": false,
+    "body_used": true,
+    "manual_url_guess": true,
+    "noisy_text": false,
+    "form_confusion": true,
+    "rate_limited": false,
+    "challenge_routed": false
+  },
+  "path_taken": ["navigate home", "submit search", "navigate abs page"],
+  "failure_or_friction": "Search form selection was ambiguous."
+}
+```
+
+Allowed `handling` values:
+
+| Value | Meaning |
+|---|---|
+| `answered` | Task was answered directly. |
+| `challenge_routed` | Task stopped on an expected challenge and exposed actionable metadata. |
+| `rate_limited` | Task stopped on `429` or equivalent retry-later state. |
+| `site_drift` | Benchmark target no longer exists or has materially changed. |
+| `failed` | Any other failure. |
+
 ## Merge order
 
 1. Merge Agent A first. It changes DOM/blockmap/interact internals and unblocks better form/search behavior.
 2. Merge Agent C second. It changes JS extraction internals with limited API surface.
-3. Merge Agent D third. Challenge/rate-limit behavior is mostly independent.
-4. Merge Agent B fourth. It wires final RPC/MCP API names and docs after A/C settle.
+3. Merge Agent D third. Challenge/rate-limit behavior is mostly independent, and it should land before Agent B so text/search helpers can consume accurate `rate_limit` and challenge metadata instead of encoding their own retry heuristics.
+4. Merge Agent B fourth. It wires final RPC/MCP API names and docs after A/C settle, and after D defines the final retry/escalation signals.
 5. Merge Agent E fifth. The scorer/corpus should target the final result schema.
 6. Integrator runs full tests, reruns the 16 tasks, commits final docs, and opens one implementation PR from `feature/webvoyager-usability`.
 
