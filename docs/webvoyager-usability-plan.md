@@ -27,6 +27,18 @@ auditable.
 The all-site coverage seed is checked in at
 `docs/webvoyager-site-coverage-v1.jsonl`.
 
+An initial all-site run is checked in at
+`docs/webvoyager-site-coverage-run-v1-2026-05-17.jsonl`.
+
+| Metric | All-site run |
+|---|---:|
+| Sites covered | 15 / 15 |
+| Answer success | 8 / 15 |
+| Handled success | 15 / 15 |
+| Answered directly | 8 |
+| Challenge-routed | 3 |
+| Browser-routed | 4 |
+
 | Metric | Baseline |
 |---|---:|
 | Answer success | 11 / 16 |
@@ -300,6 +312,6 @@ Candidate acceptance targets:
 - No regressions on the 11 successful baseline tasks.
 - Preserve `3 / 3` correct `aws_waf` routing.
 - Improve `ArXiv--0` from `unknown_block` to clean `rate_limited` handling, or complete it if possible without unsafe retrying.
-- Execute all 15 sites in `docs/webvoyager-site-coverage-v1.jsonl` and report answer success plus handled success by site.
+- Execute all 15 sites in `docs/webvoyager-site-coverage-v1.jsonl` and report answer success plus handled success by site against `docs/webvoyager-site-coverage-run-v1-2026-05-17.jsonl`.
 - Do not silently skip any benchmark site; a challenge, rate limit, browser-route decision, or site-drift classification is a valid handled outcome, but a missing site is not.
 - Reduce friction counters, especially `eval_used`, `body_used`, `manual_url_guess`, `noisy_text`, and `form_confusion`.
