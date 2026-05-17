@@ -11,9 +11,13 @@ Sixteen read-only WebVoyager tasks were run with subagents using only
 `target/release/unbrowser` over JSON-RPC.
 
 Raw per-task baseline records are checked in at
-`docs/webvoyager-baseline-2026-05-16.jsonl`. The file intentionally stores the
+`docs/webvoyager-baseline-v1-2026-05-16.jsonl`. The file intentionally stores the
 subagent result summaries in JSONL rather than prose so future candidate runs can
 diff task outcomes, timings, signals, and friction counters mechanically.
+
+Baseline artifact naming uses `webvoyager-baseline-v{N}-YYYY-MM-DD.jsonl` so a
+single current baseline version can be referenced while older baselines remain
+auditable.
 
 | Metric | Baseline |
 |---|---:|
@@ -142,6 +146,7 @@ be automated.
 ```json
 {
   "task_id": "ArXiv--17",
+  "run_timestamp": "2026-05-16T00:00:00Z",
   "web_name": "ArXiv",
   "start_url": "https://arxiv.org/",
   "question": "Find the paper 'GPT-4 Technical Report', when was v3 submitted?",
