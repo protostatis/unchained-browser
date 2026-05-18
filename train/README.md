@@ -172,6 +172,9 @@ subagents; it validates a JSONL corpus against a JSONL result file and prints
 answer success, handled success, handling counts, per-site metrics, and friction
 totals.
 
+The result data contract and artifact changelog live in
+`docs/webvoyager-data-format.md`.
+
 ```bash
 # All-site coverage run
 python3 train/webvoyager_eval.py score \

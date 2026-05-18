@@ -19,6 +19,8 @@ Raw per-task baseline records are checked in at
 `docs/webvoyager-baseline-v1-2026-05-16.jsonl`. The file intentionally stores the
 subagent result summaries in JSONL rather than prose so future candidate runs can
 diff task outcomes, timings, signals, and friction counters mechanically.
+The canonical JSONL data contract and artifact changelog are documented in
+`docs/webvoyager-data-format.md`.
 
 Baseline artifact naming uses `webvoyager-baseline-v{N}-YYYY-MM-DD.jsonl` so a
 single current baseline version can be referenced while older baselines remain
@@ -552,6 +554,9 @@ Likely answer-success gains:
 
 Start from a single integration branch, then create subagent branches from it:
 
+Before rerunning this setup, remove stale worktrees with `git worktree remove` or
+choose fresh paths; the example uses sibling directories outside the repo root.
+
 ```bash
 git switch -c feature/webvoyager-usability
 git worktree add ../ub-agent-blockmap -b agent/blockmap-forms
@@ -608,13 +613,16 @@ Text tool additions:
 |---|---|
 | `find_text {text, selector?, exact?, limit?, context_chars?}` | Return localized text hits with context: `{ref, tag, attrs, text, before, match, after}`. |
 | `text_around {text? | ref?, selector?, context_chars?}` | Return text near a known string or element ref. |
-| `text_clean` or `text_main` extension | Strip `script`, `style`, `noscript`, embedded JSON, nav/footer/aside, and duplicate boilerplate. |
+| `text_clean {selector?, max_chars?}` | Strip `script`, `style`, `noscript`, embedded JSON, nav/footer/aside, and duplicate boilerplate. |
+| `text_main` | Return the primary readable page text when the page exposes a main/article body. |
 
 Challenge/rate-limit additions:
 
 | Field | Shape |
 |---|---|
+| `navigate.challenge` | `null` or `{blocked, provider, confidence, status, matched, clearance_cookie, reason, hint}` |
 | `navigate.rate_limit` | `{limited, status, retry_after, retry_after_seconds, hint}` |
+| `navigate.browser_route` | `null` or `{needed, reason, confidence, evidence, hint}` |
 | `challenge.provider` for AWS WAF | Keep `aws_waf`; ensure docs/router/watch all label it clearly. |
 | `429` handling | Prefer `rate_limited` metadata over generic `unknown_block` when no vendor signature is present. |
 
@@ -637,14 +645,16 @@ Network/action additions:
 
 ## Shared result schema
 
-All subagents and the eval runner should emit one JSON object per task with this
-shape. Extra fields are allowed, but these keys must stay stable so scoring can
-be automated.
+All subagents and the eval runner should emit one JSON object per task. Extra
+fields are allowed, but stable keys and optional field semantics are defined in
+`docs/webvoyager-data-format.md` so scoring can be automated.
 
 ```json
 {
   "task_id": "ArXiv--17",
-  "run_timestamp": "2026-05-16T00:00:00Z",
+  "schema_version": "webvoyager-result-v1",
+  "run_id": "webvoyager-v5-2026-05-17",
+  "run_timestamp": "2026-05-17T22:18:30Z",
   "web_name": "ArXiv",
   "start_url": "https://arxiv.org/",
   "question": "Find the paper 'GPT-4 Technical Report', when was v3 submitted?",
@@ -652,14 +662,16 @@ be automated.
   "handled_success": true,
   "handling": "answered",
   "answer": "Mon, 27 Mar 2023 17:46:54 UTC",
-  "confidence": "high",
+  "confidence": 0.95,
   "steps": 15,
   "elapsed_ms": 90000,
   "unbrowser_signals": {
     "statuses": [200],
     "challenge_provider": null,
+    "challenge": null,
     "likely_js_filled": false,
-    "rate_limit": null
+    "rate_limit": null,
+    "browser_route": null
   },
   "friction": {
     "eval_used": false,
@@ -668,9 +680,10 @@ be automated.
     "noisy_text": false,
     "form_confusion": true,
     "rate_limited": false,
-    "challenge_routed": false
+    "challenge_routed": false,
+    "browser_routed": false
   },
-  "path_taken": ["navigate home", "submit search", "navigate abs page"],
+  "path_taken": ["navigate https://arxiv.org/", "submit search", "navigate abs page"],
   "failure_or_friction": "Search form selection was ambiguous."
 }
 ```
@@ -682,6 +695,7 @@ Allowed `handling` values:
 | `answered` | Task was answered directly. |
 | `challenge_routed` | Task stopped on an expected challenge and exposed actionable metadata. |
 | `rate_limited` | Task stopped on `429` or equivalent retry-later state. |
+| `browser_routed` | Strict `unbrowser` cannot serve the required rendered/canvas/JS UI; use a browser. |
 | `site_drift` | Benchmark target no longer exists or has materially changed. |
 | `failed` | Any other failure. |
 
@@ -689,7 +703,7 @@ Allowed `handling` values:
 
 1. Merge Agent A first. It changes DOM/blockmap/interact internals and unblocks better form/search behavior.
 2. Merge Agent C second. It changes JS extraction internals with limited API surface.
-3. Merge Agent D third. Challenge/rate-limit behavior is mostly independent, and it should land before Agent B so text/search helpers can consume accurate `rate_limit` and challenge metadata instead of encoding their own retry heuristics.
+3. Merge Agent D third. Challenge/rate-limit behavior should land after Agent A's form/search improvements and before Agent B so text/search helpers can consume accurate `rate_limit` and challenge metadata instead of encoding their own retry heuristics.
 4. Merge Agent B fourth. It wires final RPC/MCP API names and docs after A/C settle, and after D defines the final retry/escalation signals.
 5. Merge Agent E fifth. The scorer/corpus should target the final result schema.
 6. Integrator runs full tests, reruns both fixed corpora, commits final docs, and opens one implementation PR from `feature/webvoyager-usability`.
@@ -701,7 +715,7 @@ Every subagent should run:
 ```bash
 cargo test
 cargo build --release
-python3 -m unittest train.test_collect -v
+python3 -m unittest train.test_webvoyager_eval -v
 ```
 
 Subagents should add local smoke scripts when useful, following the existing
@@ -771,7 +785,7 @@ Track two top-level scores:
 | Score | Meaning |
 |---|---|
 | Answer success | The task was answered correctly. |
-| Handled success | The task was answered correctly or correctly routed as expected challenge/site drift/rate-limit. |
+| Handled success | The task was answered correctly or correctly routed as expected challenge/site drift/rate-limit/browser-route. |
 
 Also track friction counters from subagent reports:
 
@@ -784,12 +798,13 @@ Also track friction counters from subagent reports:
 | `form_confusion` | Agent selected the wrong form/input/submit path. |
 | `rate_limited` | Site returned `429` or equivalent. |
 | `challenge_routed` | Challenge was correctly surfaced without retries. |
+| `browser_routed` | Strict `unbrowser` correctly identified a rendered/canvas/JS-only route. |
 
 Candidate acceptance targets:
 
 - No regressions on the 11 successful baseline tasks.
 - Preserve `3 / 3` correct `aws_waf` routing.
-- Improve `ArXiv--0` from `unknown_block` to clean `rate_limited` handling, or complete it if possible without unsafe retrying.
+- Improve `ArXiv--0` from `unknown_block` to clean `rate_limited` handling with at most one retry after the first `429`, or complete it if possible without unsafe retrying.
 - Execute all 15 sites in `docs/webvoyager-site-coverage-v1.jsonl` and report answer success plus handled success by site against `docs/webvoyager-site-coverage-run-v1-2026-05-17.jsonl`.
 - Do not silently skip any benchmark site; a challenge, rate limit, browser-route decision, or site-drift classification is a valid handled outcome, but a missing site is not.
 - Reduce friction counters, especially `eval_used`, `body_used`, `manual_url_guess`, `noisy_text`, and `form_confusion`.
