@@ -278,10 +278,8 @@
     child.__unbHandled = true;
 
     var attrs = child._attributes || {};
-    // Pages set s.src / s.type either via setAttribute (-> _attributes) or
-    // direct property assignment (-> JS slot). Real browsers reflect IDL
-    // properties to attributes; we don't, so check both. Direct property
-    // wins when present (matches what the page believes it set).
+    // Pages set s.src / s.type either via setAttribute or direct property
+    // assignment. Both reflect to attributes below, matching browser DOM.
     var type = ((child.type !== undefined ? child.type : attrs.type) || '').toString().toLowerCase();
     // Skip non-JS script types (JSON-LD, application/json, x-tmpl, etc.).
     // Empty type and "module" both count as JS.
@@ -628,6 +626,32 @@
   Object.defineProperty(Element.prototype, 'className', {
     get: function() { return this._attributes['class'] || ''; },
     set: function(v) { this.setAttribute('class', v); }
+  });
+
+  function reflectStringProperty(prop, attrName, resolveAsUrl) {
+    attrName = attrName || prop;
+    Object.defineProperty(Element.prototype, prop, {
+      get: function() {
+        var raw = this.getAttribute(attrName);
+        if (raw == null) return '';
+        if (resolveAsUrl) {
+          var baseHref = (typeof location !== 'undefined' && location.href) || '';
+          return __resolveURL(raw, baseHref);
+        }
+        return raw;
+      },
+      set: function(v) {
+        this.setAttribute(attrName, v == null ? '' : String(v));
+      },
+      configurable: true,
+    });
+  }
+
+  ['href', 'src', 'action'].forEach(function(prop) {
+    reflectStringProperty(prop, prop, true);
+  });
+  ['method', 'name', 'type', 'placeholder', 'title', 'alt', 'rel', 'target'].forEach(function(prop) {
+    reflectStringProperty(prop, prop, false);
   });
 
   // Boolean HTML attributes that mirror to a same-named JS property. Real
