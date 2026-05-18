@@ -15,6 +15,10 @@ All files are JSONL: one JSON object per non-empty line. Consumers must tolerate
 extra fields and absent optional fields because run artifacts are audit records,
 not migrations of older measurements.
 
+Legacy artifacts may contain batch-level or normalized timestamps shared by
+multiple rows. Treat those as run provenance, not per-task timing. New artifacts
+should prefer per-task end timestamps plus a shared `run_id`.
+
 ## Corpus Rows
 
 Corpus rows must include:
@@ -36,7 +40,7 @@ fields listed here; see the changelog below.
 |---|---|---|
 | `schema_version` | string, optional | Preferred value for new rows: `webvoyager-result-v1`. |
 | `run_id` | string, optional | Shared identifier for all rows from one execution batch. |
-| `run_timestamp` | string | ISO-8601 task end time. Use real run-end time, not a date placeholder. UTC rollover between local start and end is valid. |
+| `run_timestamp` | string | ISO-8601 task end time. Use real run-end time for new rows. UTC rollover between local start and end is valid. |
 | `task_id` | string | Matches a corpus row. |
 | `web_name` | string | Site label. |
 | `start_url` | string | Initial URL. |
