@@ -2797,6 +2797,15 @@ impl NetworkObjectCandidate {
     }
 }
 
+struct NetworkCandidateWalk<'a> {
+    capture: &'a network_store::NetworkCapture,
+    terms: &'a [String],
+    out: &'a mut Vec<NetworkObjectCandidate>,
+    visited: usize,
+    max_nodes: usize,
+    max_objects: usize,
+}
+
 fn parse_object_type_filter(types: Option<&Value>) -> Option<HashSet<String>> {
     let set: HashSet<String> = types?
         .as_array()?
@@ -2857,62 +2866,46 @@ fn extract_network_objects_from_capture(
     }
 
     let mut out = Vec::new();
-    let mut visited = 0usize;
     let max_nodes = max_objects.saturating_mul(80).max(400);
-    for (value, path) in &roots {
-        collect_network_candidates(
-            value,
-            path,
+    {
+        let mut walk = NetworkCandidateWalk {
             capture,
             terms,
-            &mut out,
-            &mut visited,
+            out: &mut out,
+            visited: 0,
             max_nodes,
             max_objects,
-        );
-        if out.len() >= max_objects {
-            break;
+        };
+        for (value, path) in &roots {
+            collect_network_candidates(value, path, &mut walk);
+            if walk.out.len() >= max_objects {
+                break;
+            }
         }
     }
     Ok(out)
 }
 
-fn collect_network_candidates(
-    value: &Value,
-    path: &str,
-    capture: &network_store::NetworkCapture,
-    terms: &[String],
-    out: &mut Vec<NetworkObjectCandidate>,
-    visited: &mut usize,
-    max_nodes: usize,
-    max_objects: usize,
-) {
-    if *visited >= max_nodes || out.len() >= max_objects {
+fn collect_network_candidates(value: &Value, path: &str, walk: &mut NetworkCandidateWalk<'_>) {
+    if walk.visited >= walk.max_nodes || walk.out.len() >= walk.max_objects {
         return;
     }
-    *visited += 1;
+    walk.visited += 1;
     match value {
         Value::Object(map) => {
-            if let Some(candidate) = network_candidate_from_object(map, path, capture, terms) {
-                out.push(candidate);
-                if out.len() >= max_objects {
+            if let Some(candidate) =
+                network_candidate_from_object(map, path, walk.capture, walk.terms)
+            {
+                walk.out.push(candidate);
+                if walk.out.len() >= walk.max_objects {
                     return;
                 }
             }
             for (key, child) in map {
                 if matches!(child, Value::Array(_) | Value::Object(_)) {
                     let child_path = json_path_child(path, key);
-                    collect_network_candidates(
-                        child,
-                        &child_path,
-                        capture,
-                        terms,
-                        out,
-                        visited,
-                        max_nodes,
-                        max_objects,
-                    );
-                    if *visited >= max_nodes || out.len() >= max_objects {
+                    collect_network_candidates(child, &child_path, walk);
+                    if walk.visited >= walk.max_nodes || walk.out.len() >= walk.max_objects {
                         return;
                     }
                 }
@@ -2921,17 +2914,8 @@ fn collect_network_candidates(
         Value::Array(arr) => {
             for (idx, child) in arr.iter().take(250).enumerate() {
                 let child_path = format!("{path}[{idx}]");
-                collect_network_candidates(
-                    child,
-                    &child_path,
-                    capture,
-                    terms,
-                    out,
-                    visited,
-                    max_nodes,
-                    max_objects,
-                );
-                if *visited >= max_nodes || out.len() >= max_objects {
+                collect_network_candidates(child, &child_path, walk);
+                if walk.visited >= walk.max_nodes || walk.out.len() >= walk.max_objects {
                     return;
                 }
             }
