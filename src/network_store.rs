@@ -215,6 +215,10 @@ impl NetworkStore {
     /// `nav_scope` defaults to filtering by current nav_id when called from
     /// navigate_with — page B never sees page A's captures in its summary.
     pub fn summary(&self, top_k: usize, nav_scope: NavScope) -> NetworkStoreSummary {
+        let hint_nav_id = match &nav_scope {
+            NavScope::Only(id) => Some((*id).to_string()),
+            NavScope::All => None,
+        };
         let scoped: Vec<&NetworkCapture> = self
             .captures
             .iter()
@@ -223,12 +227,20 @@ impl NetworkStore {
                 NavScope::Only(id) => c.navigation_id.as_deref() == Some(id),
             })
             .collect();
+        let source_hosts = source_host_summaries(&scoped);
         let mut tops = scoped.clone();
         tops.sort_by_key(|c| std::cmp::Reverse(c.score));
         tops.truncate(top_k);
         NetworkStoreSummary {
             count: scoped.len(),
             total_bytes: scoped.iter().map(|c| c.body_preview.len()).sum(),
+            top_limit: top_k,
+            has_more: scoped.len() > tops.len(),
+            source_hosts,
+            full_query_hint: NetworkStoresQueryHint {
+                limit: 100,
+                nav_id: hint_nav_id,
+            },
             top: tops
                 .iter()
                 .map(|c| NetworkCaptureMeta {
@@ -261,7 +273,27 @@ impl NetworkStore {
 pub struct NetworkStoreSummary {
     pub count: usize,
     pub total_bytes: usize,
+    pub top_limit: usize,
+    pub has_more: bool,
+    pub source_hosts: Vec<NetworkSourceHostSummary>,
+    pub full_query_hint: NetworkStoresQueryHint,
     pub top: Vec<NetworkCaptureMeta>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkSourceHostSummary {
+    pub host: String,
+    pub count: usize,
+    pub bytes: usize,
+    pub top_score: u32,
+    pub kinds: Vec<ContentKind>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkStoresQueryHint {
+    pub limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nav_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -394,6 +426,37 @@ fn host_of(url: &str) -> String {
         .ok()
         .and_then(|u| u.host_str().map(|s| s.to_lowercase()))
         .unwrap_or_default()
+}
+
+fn source_host_summaries(captures: &[&NetworkCapture]) -> Vec<NetworkSourceHostSummary> {
+    let mut by_host: HashMap<String, NetworkSourceHostSummary> = HashMap::new();
+    for c in captures {
+        let host = host_of(&c.url);
+        let entry = by_host
+            .entry(host.clone())
+            .or_insert_with(|| NetworkSourceHostSummary {
+                host,
+                count: 0,
+                bytes: 0,
+                top_score: 0,
+                kinds: Vec::new(),
+            });
+        entry.count += 1;
+        entry.bytes += c.body_bytes;
+        entry.top_score = entry.top_score.max(c.score);
+        if !entry.kinds.contains(&c.kind) {
+            entry.kinds.push(c.kind);
+        }
+    }
+
+    let mut summaries: Vec<_> = by_host.into_values().collect();
+    summaries.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| b.top_score.cmp(&a.top_score))
+            .then_with(|| a.host.cmp(&b.host))
+    });
+    summaries
 }
 
 fn now_ms() -> u64 {
@@ -675,6 +738,70 @@ mod tests {
                 .iter()
                 .all(|c| c.navigation_id.as_deref() == Some("nav_2"))
         );
+    }
+
+    #[test]
+    fn summary_includes_all_source_hosts_when_top_is_limited() {
+        let mut s = NetworkStore::default();
+        for i in 0..3 {
+            cap_nav(
+                &mut s,
+                &format!("https://api.alpha.com/v1/items/{i}"),
+                "application/json",
+                &format!(r#"{{"alpha":{i}}}"#),
+                "nav_1",
+            );
+        }
+        for i in 0..2 {
+            cap_nav(
+                &mut s,
+                &format!("https://api.beta.com/graphql/{i}"),
+                "application/graphql+json",
+                &format!(r#"{{"data":{{"beta":{i}}}}}"#),
+                "nav_1",
+            );
+        }
+        cap_nav(
+            &mut s,
+            "https://cdn.gamma.com/_next/data/build/page.json",
+            "application/json",
+            r#"{"pageProps":{"gamma":1}}"#,
+            "nav_1",
+        );
+
+        let sum = s.summary(5, NavScope::Only("nav_1"));
+        assert_eq!(sum.count, 6);
+        assert_eq!(sum.top.len(), 5);
+        assert_eq!(sum.top_limit, 5);
+        assert!(sum.has_more);
+        assert_eq!(sum.full_query_hint.limit, 100);
+        assert_eq!(sum.full_query_hint.nav_id.as_deref(), Some("nav_1"));
+        assert_eq!(sum.source_hosts.len(), 3);
+
+        let alpha = sum
+            .source_hosts
+            .iter()
+            .find(|h| h.host == "api.alpha.com")
+            .unwrap();
+        assert_eq!(alpha.count, 3);
+        assert!(alpha.bytes > 0);
+        assert_eq!(alpha.kinds, vec![ContentKind::Json]);
+
+        let beta = sum
+            .source_hosts
+            .iter()
+            .find(|h| h.host == "api.beta.com")
+            .unwrap();
+        assert_eq!(beta.count, 2);
+        assert_eq!(beta.kinds, vec![ContentKind::GraphQl]);
+
+        let gamma = sum
+            .source_hosts
+            .iter()
+            .find(|h| h.host == "cdn.gamma.com")
+            .unwrap();
+        assert_eq!(gamma.count, 1);
+        assert_eq!(gamma.kinds, vec![ContentKind::NextRouteData]);
     }
 
     #[test]

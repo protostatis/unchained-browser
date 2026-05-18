@@ -88,6 +88,19 @@
       if (!name) continue;
       var type = (inp.getAttribute('type') || 'text').toLowerCase();
       if (type === 'submit' || type === 'button' || type === 'reset' || type === 'image') continue;
+      if (inp.tagName === 'SELECT') {
+        var opts = inp.getElementsByTagName('option');
+        var selected = [];
+        for (var oi = 0; oi < opts.length; oi++) {
+          if (opts[oi].selected) selected.push(opts[oi]);
+        }
+        if (selected.length === 0 && opts[0]) selected.push(opts[0]);
+        for (var si = 0; si < selected.length; si++) {
+          var opt = selected[si];
+          fields.push([name, String(opt.getAttribute('value') || opt.textContent || '')]);
+        }
+        continue;
+      }
       // Checkbox/radio: only emit when checked. Browsers serialize the value
       // attr ('on' default for checkboxes), and skip the field entirely when
       // unchecked. We mirror that.

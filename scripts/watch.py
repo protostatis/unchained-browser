@@ -72,6 +72,16 @@ def fmt_event(name: str, fields: dict) -> str:
             bits.append(f"  scripts:{c('35', str(ex))}")
             if it:
                 bits.append(f" {c('31', f'interrupted:{it}')}")
+        route = fields.get("browser_route") or {}
+        if route.get("needed"):
+            bits.append(
+                f"  {c('35;1', 'browser_route')}:{route.get('reason')}"
+            )
+        limit = fields.get("rate_limit") or {}
+        if limit.get("limited"):
+            bits.append(
+                f"  {c('33;1', 'rate_limit')}:{limit.get('retry_after') or 'retry'}"
+            )
         return "".join(bits)
 
     if name == "challenge":

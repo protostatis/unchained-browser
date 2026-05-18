@@ -12,7 +12,10 @@
 //   b. The fn signature is always (body: &str, current_url: &str) -> Option<String>.
 //   c. Add a unit test in the tests module below.
 
+use std::collections::HashMap;
+
 use serde::Serialize;
+use serde_json::{Value, json};
 
 const HINT_ESCALATE: &str = "Solve once in real Chrome (or via unchainedsky CLI), copy the clearance \
      cookie via DevTools, paste with cookies_set, then retry navigate. \
@@ -31,6 +34,16 @@ pub struct Detection {
     pub status: u16,
     pub matched: Vec<&'static str>,
     pub clearance_cookie: Option<&'static str>,
+    pub reason: String,
+    pub hint: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RateLimit {
+    pub limited: bool,
+    pub status: u16,
+    pub retry_after: Option<String>,
+    pub retry_after_seconds: Option<u64>,
     pub reason: String,
     pub hint: &'static str,
 }
@@ -180,7 +193,6 @@ pub fn detect(status: u16, body: &str) -> Option<Detection> {
                 "access denied",
                 "automated requests",
                 "sorry, you have been blocked",
-                "you are being rate limited",
             ],
             "",
         ),
@@ -215,7 +227,11 @@ pub fn detect(status: u16, body: &str) -> Option<Detection> {
         });
     }
 
-    // Fallback: tiny body on anomalous status with no vendor match.
+    // Fallback: tiny body on anomalous status with no vendor match. Rate limits
+    // are reported separately by detect_rate_limit(), not as unknown bot walls.
+    if is_rate_limited(status, &lower, None) {
+        return None;
+    }
     let anomalous = !matches!(status, 200 | 301 | 302 | 304 | 404 | 410)
         && (status >= 400 || status == 202 || status == 401 || status == 403);
     if anomalous && body.len() < 5_000 {
@@ -237,6 +253,169 @@ pub fn detect(status: u16, body: &str) -> Option<Detection> {
     }
 
     None
+}
+
+pub fn detect_rate_limit(
+    status: u16,
+    body: &str,
+    headers: &HashMap<String, String>,
+) -> Option<RateLimit> {
+    let lower = body.to_lowercase();
+    let retry_after = headers.get("retry-after").cloned();
+    if !is_rate_limited(status, &lower, retry_after.as_deref()) {
+        return None;
+    }
+    let retry_after_seconds = retry_after.as_deref().and_then(parse_retry_after_seconds);
+    let reason = if status == 429 {
+        "HTTP 429 Too Many Requests".to_string()
+    } else if retry_after.is_some() {
+        format!("HTTP {status} with Retry-After header")
+    } else {
+        format!("HTTP {status} retry-later response")
+    };
+    Some(RateLimit {
+        limited: true,
+        status,
+        retry_after,
+        retry_after_seconds,
+        reason,
+        hint: "Back off this URL/domain, honor Retry-After when present, and retry later instead of escalating as a bot challenge.",
+    })
+}
+
+pub fn detect_browser_route(status: u16, body: &str, blockmap: &Value) -> Option<Value> {
+    if !(200..400).contains(&status) {
+        return None;
+    }
+    let lower = body.to_lowercase();
+    let title = blockmap
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let density = blockmap.get("density").unwrap_or(&Value::Null);
+    let thin_shell = density
+        .get("thin_shell")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let likely_js_filled = density
+        .get("likely_js_filled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let interactives = blockmap.get("interactives").unwrap_or(&Value::Null);
+    let links = interactives
+        .get("links")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let buttons = interactives
+        .get("buttons")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let inputs = interactives
+        .get("inputs")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len() as u64)
+        .unwrap_or(0);
+    let forms = interactives
+        .get("forms")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len() as u64)
+        .unwrap_or(0);
+    let interactive_count = links + buttons + inputs + forms;
+    let structure_count = blockmap
+        .get("structure")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    let mut evidence: Vec<&'static str> = Vec::new();
+    let (reason, confidence) = if contains_any(
+        &lower,
+        &[
+            "/httpservice/retry/enablejs",
+            "trouble accessing search",
+            "sg_rel",
+            "enablejs",
+        ],
+    ) {
+        evidence.push("google_enablejs_retry");
+        ("enable_js_interstitial", 0.90)
+    } else if contains_any(
+        &lower,
+        &[
+            "enable javascript",
+            "enable js",
+            "please turn javascript on",
+            "javascript is disabled",
+            "requires javascript to be enabled",
+            "to continue, enable javascript",
+        ],
+    ) || title.contains("enable javascript")
+    {
+        evidence.push("enable_js_text");
+        ("enable_js_interstitial", 0.94)
+    } else if contains_any(
+        &lower,
+        &[
+            "mapboxgl",
+            "leaflet",
+            "google.maps",
+            "maps.googleapis.com",
+            "<canvas",
+            "webgl",
+        ],
+    ) {
+        evidence.push("canvas_or_map_signature");
+        ("canvas_or_map_ui", 0.86)
+    } else if thin_shell {
+        evidence.push("blockmap.density.thin_shell");
+        ("thin_shell", 0.88)
+    } else if likely_js_filled {
+        evidence.push("blockmap.density.likely_js_filled");
+        ("rendered_result_required", 0.78)
+    } else if structure_count == 0 && interactive_count == 0 && body.len() < 20_000 {
+        evidence.push("no_structure_or_interactives");
+        ("no_interactives", 0.72)
+    } else if contains_any(&lower, &["search", "sign in", "checkout", "continue"])
+        && interactive_count == 0
+    {
+        evidence.push("primary_action_text_without_interactives");
+        ("missing_primary_action", 0.70)
+    } else {
+        return None;
+    };
+
+    Some(json!({
+        "needed": true,
+        "reason": reason,
+        "confidence": confidence,
+        "evidence": evidence,
+        "hint": "Route this page to real browser automation; unbrowser should not keep retrying the same response.",
+    }))
+}
+
+fn is_rate_limited(status: u16, lower_body: &str, retry_after: Option<&str>) -> bool {
+    status == 429
+        || (status == 503
+            && (retry_after.is_some()
+                || contains_any(
+                    lower_body,
+                    &[
+                        "rate limit",
+                        "too many requests",
+                        "retry later",
+                        "try again later",
+                        "slow down",
+                    ],
+                )))
+}
+
+fn parse_retry_after_seconds(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok()
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
 }
 
 // ── Solver dispatch ──────────────────────────────────────────────────────────
@@ -391,6 +570,94 @@ mod tests {
     fn detect_unknown_block_skipped_for_normal_404() {
         // 404 is in the allow-list so the fallback should NOT fire.
         assert!(detect(404, "not found").is_none());
+    }
+
+    #[test]
+    fn detect_aws_waf_stays_challenge() {
+        let body = r#"<html><script src="/awswaf/challenge.js"></script><body>aws-waf-token</body></html>"#;
+        let d = detect(202, body).expect("should detect aws waf");
+        assert_eq!(d.provider, "aws_waf");
+        assert_eq!(d.clearance_cookie, Some("aws-waf-token"));
+    }
+
+    #[test]
+    fn rate_limit_429_is_not_unknown_challenge() {
+        let mut headers = HashMap::new();
+        headers.insert("retry-after".into(), "120".into());
+        let body = "you are being rate limited";
+        let rl = detect_rate_limit(429, body, &headers).expect("rate limit");
+        assert!(rl.limited);
+        assert_eq!(rl.retry_after.as_deref(), Some("120"));
+        assert_eq!(rl.retry_after_seconds, Some(120));
+        assert!(detect(429, body).is_none());
+    }
+
+    #[test]
+    fn browser_route_enable_js_interstitial() {
+        let blockmap = json!({
+            "title": "Enable JavaScript",
+            "structure": [],
+            "interactives": {"links": 0, "buttons": 0, "inputs": [], "forms": []},
+            "density": {"thin_shell": false, "likely_js_filled": false}
+        });
+        let route = detect_browser_route(
+            200,
+            "<html><title>Enable JavaScript</title>Please enable JavaScript to continue.</html>",
+            &blockmap,
+        )
+        .expect("browser route");
+        assert_eq!(
+            route.get("reason").and_then(|v| v.as_str()),
+            Some("enable_js_interstitial")
+        );
+    }
+
+    #[test]
+    fn browser_route_google_retry_enablejs_shell() {
+        let blockmap = json!({
+            "title": "Google Search",
+            "structure": [{"role": "main"}],
+            "interactives": {"links": 2, "buttons": 0, "inputs": [], "forms": []},
+            "density": {"thin_shell": false, "likely_js_filled": false}
+        });
+        let route = detect_browser_route(
+            200,
+            r#"<html><body><a href="/httpservice/retry/enablejs">retry</a><div id="SG_REL">Having trouble accessing Search?</div></body></html>"#,
+            &blockmap,
+        )
+        .expect("browser route");
+        assert_eq!(
+            route.get("reason").and_then(|v| v.as_str()),
+            Some("enable_js_interstitial")
+        );
+        assert_eq!(
+            route
+                .get("evidence")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str()),
+            Some("google_enablejs_retry")
+        );
+    }
+
+    #[test]
+    fn browser_route_app_shell_no_interactives() {
+        let blockmap = json!({
+            "title": "Loading",
+            "structure": [],
+            "interactives": {"links": 0, "buttons": 0, "inputs": [], "forms": []},
+            "density": {"thin_shell": true, "likely_js_filled": true}
+        });
+        let route = detect_browser_route(
+            200,
+            r#"<html><body><div id="root"></div><script src="/app.js"></script></body></html>"#,
+            &blockmap,
+        )
+        .expect("browser route");
+        assert_eq!(
+            route.get("reason").and_then(|v| v.as_str()),
+            Some("thin_shell")
+        );
     }
 
     // solve_url() -------------------------------------------------------------

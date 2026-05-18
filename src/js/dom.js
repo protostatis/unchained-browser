@@ -651,6 +651,27 @@
     });
   });
 
+  Object.defineProperty(Element.prototype, 'value', {
+    get: function() {
+      if (this._value !== undefined) return this._value;
+      if (this.tagName === 'OPTION') return this.getAttribute('value') || this.textContent || '';
+      if (this.tagName === 'TEXTAREA') return this.textContent || '';
+      if (this.tagName === 'SELECT') {
+        var opts = this.getElementsByTagName('option');
+        for (var i = 0; i < opts.length; i++) {
+          if (opts[i].selected) return opts[i].value;
+        }
+        return opts[0] ? opts[0].value : '';
+      }
+      return this.getAttribute('value') || '';
+    },
+    set: function(v) {
+      this._value = String(v == null ? '' : v);
+      if (this.tagName !== 'SELECT') this.setAttribute('value', this._value);
+    },
+    configurable: true,
+  });
+
   Object.defineProperty(Element.prototype, 'textContent', {
     get: function() {
       var text = '';

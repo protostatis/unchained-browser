@@ -128,6 +128,20 @@ class Router:
             raise RouterError(
                 f"still blocked after {attempts} escalation(s): {result['challenge']}"
             )
+        route = (result or {}).get("browser_route") or {}
+        if route.get("needed"):
+            self._log(
+                f"browser_route: reason={route.get('reason')} "
+                f"confidence={route.get('confidence')} "
+                f"evidence={route.get('evidence')}"
+            )
+        limit = (result or {}).get("rate_limit") or {}
+        if limit.get("limited"):
+            self._log(
+                f"rate_limit: status={limit.get('status')} "
+                f"retry_after={limit.get('retry_after')} "
+                f"reason={limit.get('reason')}"
+            )
         return result
 
     def query(self, selector: str) -> list[dict]:
