@@ -176,6 +176,11 @@ The result data contract and artifact changelog live in
 `docs/webvoyager-data-format.md`.
 
 ```bash
+# Validate JSONL without scoring
+python3 train/webvoyager_eval.py validate \
+  --corpus docs/webvoyager-site-coverage-v1.jsonl \
+  --results docs/webvoyager-site-coverage-run-v5-2026-05-17.jsonl
+
 # All-site coverage run
 python3 train/webvoyager_eval.py score \
   --corpus docs/webvoyager-site-coverage-v1.jsonl \
@@ -189,13 +194,15 @@ python3 train/webvoyager_eval.py score \
 
 Corpus JSONL rows must include `task_id`, `web_name`, `start_url`, and
 `question`; `expected_handling` is accepted when present. Result JSONL rows must
-include stable keys: `task_id`, `run_timestamp`, `web_name`, `start_url`,
+include stable keys: `run_id`, `task_id`, `run_timestamp`, `web_name`, `start_url`,
 `question`, `success`, `handled_success`, `handling`, `confidence`,
 `unbrowser_signals`, and `friction`. Extra fields are allowed.
 
 Validation fails on missing corpus tasks, duplicate task IDs, missing stable
-result keys, or unknown `handling` values. Result task IDs outside the corpus are
-reported as warnings and ignored by the aggregate denominator.
+result keys, unknown `handling` values, out-of-range numeric confidence values,
+unknown legacy confidence labels, or empty `failure_or_friction` strings. Result
+task IDs outside the corpus are reported as warnings and ignored by the aggregate
+denominator.
 
 ## Tests
 

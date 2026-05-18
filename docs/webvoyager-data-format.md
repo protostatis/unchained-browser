@@ -33,13 +33,13 @@ Corpus rows must include:
 
 ## Result Rows
 
-New result rows should use this schema. Older checked-in rows may omit optional
-fields listed here; see the changelog below.
+Result rows should use this schema. Optional fields are marked explicitly; all
+other fields are required by `train/webvoyager_eval.py validate`.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `schema_version` | string, optional | Preferred value for new rows: `webvoyager-result-v1`. |
-| `run_id` | string, optional | Shared identifier for all rows from one execution batch. |
+| `run_id` | string | Shared identifier for all rows from one execution batch. |
 | `run_timestamp` | string | ISO-8601 task end time. Use real run-end time for new rows. UTC rollover between local start and end is valid. |
 | `task_id` | string | Matches a corpus row. |
 | `web_name` | string | Site label. |
@@ -56,7 +56,7 @@ fields listed here; see the changelog below.
 | `unbrowser_signals` | object | Runtime signals used for answer/routing decisions. |
 | `friction` | object | Boolean friction counters. |
 | `path_taken` | array | Human-readable action strings. Prefer `verb URL` when a URL is known. |
-| `failure_or_friction` | string or null | Null or absent when there is no issue. Empty string is legacy and should not be used in new rows. |
+| `failure_or_friction` | string or null | Null or absent when there is no issue. Empty strings are invalid. |
 
 Allowed `handling` values:
 
@@ -154,11 +154,15 @@ absolute or relative URLs copied from page-owned links/forms, URLs returned by
 captured first-party APIs, query URLs generated from a discovered form action,
 or routes with explicit `route_provenance` evidence.
 
+For v1-v4 artifacts, interpret `manual_url_guess` as the friction observed by
+that run's available tools. `route_discover` provenance is only present in v5+, so
+some older guesses may become page-provenanced in later runs.
+
 ## Artifact Changelog
 
 | Artifact | Format notes |
 |---|---|
-| `webvoyager-baseline-v1-2026-05-16.jsonl` | Legacy fast-regression baseline. Uses string `confidence`; has no `schema_version` or `run_id`; `rate_limit` may be null or an object. |
+| `webvoyager-baseline-v1-2026-05-16.jsonl` | Legacy fast-regression baseline. Uses string `confidence`; has no `schema_version`; `rate_limit` may be null or an object. |
 | `webvoyager-site-coverage-run-v1-2026-05-17.jsonl` | Introduces all-site result rows, numeric `confidence`, and `browser_routed` friction. |
 | `webvoyager-site-coverage-run-v2-2026-05-17.jsonl` | Adds `browser_route` metadata. |
 | `webvoyager-site-coverage-run-v3-2026-05-17.jsonl` | Adds `page_model_summary`. |

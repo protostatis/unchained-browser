@@ -23,6 +23,7 @@ REQUIRED_CORPUS_KEYS = {
 }
 
 REQUIRED_RESULT_KEYS = {
+    "run_id",
     "task_id",
     "run_timestamp",
     "web_name",
@@ -43,6 +44,13 @@ KNOWN_HANDLING_VALUES = {
     "rate_limited",
     "site_drift",
     "failed",
+}
+
+LEGACY_CONFIDENCE_VALUES = {
+    "high",
+    "medium",
+    "low",
+    "none",
 }
 
 FRICTION_KEYS = [
@@ -96,6 +104,19 @@ def _duplicate_ids(rows: list[dict[str, Any]]) -> list[str]:
     return duplicates
 
 
+def _validate_confidence(label: str, value: Any, errors: list[str]) -> None:
+    if isinstance(value, bool):
+        errors.append(f"result {label} confidence must be a number in [0, 1] or legacy label")
+    elif isinstance(value, (int, float)):
+        if not 0.0 <= value <= 1.0:
+            errors.append(f"result {label} confidence out of range: {value!r}")
+    elif isinstance(value, str):
+        if value not in LEGACY_CONFIDENCE_VALUES:
+            errors.append(f"result {label} has unknown legacy confidence: {value!r}")
+    else:
+        errors.append(f"result {label} confidence must be a number in [0, 1] or legacy label")
+
+
 def validate(corpus: list[dict[str, Any]], results: list[dict[str, Any]]) -> None:
     errors: list[str] = []
     warnings: list[str] = []
@@ -126,15 +147,25 @@ def validate(corpus: list[dict[str, Any]], results: list[dict[str, Any]]) -> Non
         label = row.get("task_id") or f"row {idx}"
         if missing:
             errors.append(f"result {label} missing keys: {', '.join(missing)}")
+        if "run_id" in row and (not isinstance(row.get("run_id"), str) or not row.get("run_id")):
+            errors.append(f"result {label} run_id must be a non-empty string")
         handling = row.get("handling")
         if handling not in KNOWN_HANDLING_VALUES:
             errors.append(f"result {label} has unknown handling: {handling!r}")
+        if "confidence" in row:
+            _validate_confidence(str(label), row.get("confidence"), errors)
         if "success" in row and not isinstance(row.get("success"), bool):
             errors.append(f"result {label} success must be boolean")
         if "handled_success" in row and not isinstance(row.get("handled_success"), bool):
             errors.append(f"result {label} handled_success must be boolean")
         if "friction" in row and not isinstance(row.get("friction"), dict):
             errors.append(f"result {label} friction must be an object")
+        if "failure_or_friction" in row:
+            value = row.get("failure_or_friction")
+            if value == "":
+                errors.append(f"result {label} failure_or_friction must be null or non-empty string")
+            elif value is not None and not isinstance(value, str):
+                errors.append(f"result {label} failure_or_friction must be null or string")
 
     if errors or warnings:
         if errors:
@@ -251,13 +282,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     score_parser.add_argument("--corpus", type=Path, required=True)
     score_parser.add_argument("--results", type=Path, required=True)
 
+    validate_parser = subparsers.add_parser("validate", help="validate WebVoyager JSONL without scoring")
+    validate_parser.add_argument("--corpus", type=Path, required=True)
+    validate_parser.add_argument("--results", type=Path, required=True)
+
     args = parser.parse_args(argv)
 
-    if args.command == "score":
+    if args.command in {"score", "validate"}:
         try:
             corpus = load_jsonl(args.corpus)
             results = load_jsonl(args.results)
-            print_score(score(corpus, results))
+            if args.command == "score":
+                print_score(score(corpus, results))
+            else:
+                validate(corpus, results)
+                print(f"validation ok: {len(results)} results for {len(corpus)} corpus tasks")
         except ValidationIssue as exc:
             for warning in exc.warnings:
                 print(f"warning: {warning}", file=sys.stderr)

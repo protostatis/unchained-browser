@@ -17,6 +17,7 @@ import webvoyager_eval  # noqa: E402
 
 def _result(task: dict, success: bool, handled_success: bool, handling: str, friction: Optional[dict] = None) -> dict:
     return {
+        "run_id": "test-run",
         "task_id": task["task_id"],
         "run_timestamp": "2026-05-17T00:00:00Z",
         "web_name": task["web_name"],
@@ -77,6 +78,39 @@ class WebVoyagerEvalTest(unittest.TestCase):
 
         self.assertIn("unknown handling", "\n".join(ctx.exception.errors))
 
+    def test_validation_rejects_invalid_confidence_and_empty_friction(self):
+        corpus = [
+            {"task_id": "a", "web_name": "Site A", "start_url": "https://a.test/", "question": "A?"},
+            {"task_id": "b", "web_name": "Site B", "start_url": "https://b.test/", "question": "B?"},
+        ]
+        results = [
+            _result(corpus[0], True, True, "answered"),
+            _result(corpus[1], False, True, "browser_routed"),
+        ]
+        results[0]["confidence"] = 1.2
+        results[1]["failure_or_friction"] = ""
+
+        with self.assertRaises(webvoyager_eval.ValidationIssue) as ctx:
+            webvoyager_eval.score(corpus, results)
+
+        joined = "\n".join(ctx.exception.errors)
+        self.assertIn("confidence out of range", joined)
+        self.assertIn("failure_or_friction must be null or non-empty string", joined)
+
+    def test_validation_accepts_zero_confidence_and_legacy_labels(self):
+        corpus = [
+            {"task_id": "a", "web_name": "Site A", "start_url": "https://a.test/", "question": "A?"},
+            {"task_id": "b", "web_name": "Site B", "start_url": "https://b.test/", "question": "B?"},
+        ]
+        results = [
+            _result(corpus[0], False, True, "browser_routed", {"browser_routed": True}),
+            _result(corpus[1], True, True, "answered"),
+        ]
+        results[0]["confidence"] = 0.0
+        results[1]["confidence"] = "high"
+
+        webvoyager_eval.validate(corpus, results)
+
     def test_cli_prints_core_metrics(self):
         corpus = [{"task_id": "a", "web_name": "Site A", "start_url": "https://a.test/", "question": "A?"}]
         results = [_result(corpus[0], True, True, "answered", {"noisy_text": True})]
@@ -107,6 +141,35 @@ class WebVoyagerEvalTest(unittest.TestCase):
         self.assertIn("answer success: 1/1 (100.0%)", proc.stdout)
         self.assertIn("handled success: 1/1 (100.0%)", proc.stdout)
         self.assertIn("noisy_text: 1", proc.stdout)
+
+    def test_cli_validate_prints_success(self):
+        corpus = [{"task_id": "a", "web_name": "Site A", "start_url": "https://a.test/", "question": "A?"}]
+        results = [_result(corpus[0], True, True, "answered")]
+
+        with tempfile.TemporaryDirectory(prefix="wv_eval_test_") as tmp:
+            tmp_path = Path(tmp)
+            corpus_path = tmp_path / "corpus.jsonl"
+            results_path = tmp_path / "results.jsonl"
+            corpus_path.write_text("\n".join(json.dumps(row) for row in corpus) + "\n")
+            results_path.write_text("\n".join(json.dumps(row) for row in results) + "\n")
+
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO / "train" / "webvoyager_eval.py"),
+                    "validate",
+                    "--corpus",
+                    str(corpus_path),
+                    "--results",
+                    str(results_path),
+                ],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertIn("validation ok: 1 results for 1 corpus tasks", proc.stdout)
 
 
 if __name__ == "__main__":
