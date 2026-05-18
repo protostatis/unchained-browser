@@ -208,6 +208,10 @@
   globalThis.fetch = function(input, init) {
     init = init || {};
     var url = (typeof input === 'string') ? input : (input && input.url ? input.url : String(input));
+    if (typeof url === 'string' && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url) &&
+        typeof __host_resolve_url === 'function') {
+      url = __host_resolve_url(url, (globalThis.location && globalThis.location.href) || '');
+    }
     var method = (init.method || 'GET').toUpperCase();
     var headers = {};
     if (init.headers) {

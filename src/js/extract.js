@@ -333,6 +333,363 @@
     return null;
   }
 
+  var SKIP_TEXT_TAGS = {
+    script: true, style: true, noscript: true, template: true, svg: true
+  };
+  var CHROME_TEXT_TAGS = { nav: true, header: true, footer: true, aside: true };
+
+  function collapseWhitespace(s) {
+    return String(s || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function tagName(node) {
+    return ((node && node.tagName) || '').toLowerCase();
+  }
+
+  function isHidden(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.hasAttribute('hidden')) return true;
+    if ((el.getAttribute('aria-hidden') || '').toLowerCase() === 'true') return true;
+    var style = (el.getAttribute('style') || '').toLowerCase();
+    return style.indexOf('display:none') !== -1 ||
+           style.indexOf('visibility:hidden') !== -1;
+  }
+
+  function looksLikeImageArtifact(s) {
+    s = collapseWhitespace(s);
+    if (!s) return true;
+    if (/^(image|photo|picture|thumbnail|avatar|logo|icon)$/i.test(s)) return true;
+    if (/^(data:image\/|https?:\/\/|\/\/)/i.test(s)) return true;
+    if (/\.(jpe?g|png|gif|webp|svg|avif)(\?.*)?$/i.test(s)) return true;
+    if (/^(src|srcset|alt)=/i.test(s)) return true;
+    return false;
+  }
+
+  function cleanNodeText(el) {
+    var chunks = [];
+    function walk(node) {
+      if (!node) return;
+      if (node.nodeType === 3) {
+        var t = collapseWhitespace(node.textContent || '');
+        if (t && !looksLikeImageArtifact(t)) chunks.push(t);
+        return;
+      }
+      if (node.nodeType !== 1 && node.nodeType !== 9 && node.nodeType !== 11) return;
+      var tag = tagName(node);
+      if (SKIP_TEXT_TAGS[tag] || isHidden(node)) return;
+      var kids = node.childNodes || [];
+      for (var i = 0; i < kids.length; i++) walk(kids[i]);
+    }
+    walk(el);
+
+    var deduped = [];
+    for (var i = 0; i < chunks.length; i++) {
+      var chunk = chunks[i];
+      if (!chunk) continue;
+      if (deduped.length && deduped[deduped.length - 1] === chunk) continue;
+      deduped.push(chunk);
+    }
+    var text = collapseWhitespace(deduped.join(' '));
+    var doubled = text.match(/^(.{8,160})\s+\1$/);
+    if (doubled) text = doubled[1];
+    return text;
+  }
+
+  function cleanText(value) {
+    if (value && typeof value === 'object' && value.nodeType) {
+      return cleanNodeText(value);
+    }
+    return collapseWhitespace(value);
+  }
+
+  function isSkipTag(tag, dropChrome) {
+    if (SKIP_TEXT_TAGS[tag]) return true;
+    return dropChrome && CHROME_TEXT_TAGS[tag];
+  }
+
+  function looksJsonText(s) {
+    s = cleanText(s);
+    if (s.length < 40) return false;
+    var first = s.charAt(0), last = s.charAt(s.length - 1);
+    if (!((first === '{' && last === '}') || (first === '[' && last === ']'))) return false;
+    var punctuation = (s.match(/[{}[\]":,]/g) || []).length;
+    return punctuation / s.length > 0.08;
+  }
+
+  function attrsOf(el) {
+    return el && el._attributes ? el._attributes : {};
+  }
+
+  function textFrom(root, opts) {
+    opts = opts || {};
+    var out = [];
+    var seen = {};
+    function walk(node) {
+      if (!node) return;
+      if (node.nodeType === 3) {
+        var t = cleanText(node.textContent || '');
+        if (!t || looksJsonText(t)) return;
+        if (t.length > 30) {
+          if (seen[t]) return;
+          seen[t] = true;
+        }
+        out.push(t);
+        return;
+      }
+      if (node.nodeType !== 1) return;
+      var tag = tagName(node);
+      if (isSkipTag(tag, opts.dropChrome !== false) || isHidden(node)) return;
+      var own = cleanText(node.textContent || '');
+      if (looksJsonText(own)) return;
+      for (var i = 0; i < (node.childNodes || []).length; i++) walk(node.childNodes[i]);
+    }
+    walk(root);
+    return cleanText(out.join(' '));
+  }
+
+  function contentScore(el) {
+    if (!el) return -1;
+    var tag = tagName(el);
+    var text = textFrom(el, { dropChrome: true });
+    var score = text.length;
+    if (tag === 'article') score += 2000;
+    if (tag === 'main') score += 1600;
+    if ((el.getAttribute && el.getAttribute('role')) === 'main') score += 1600;
+    if (tag === 'section') score += 300;
+    return score;
+  }
+
+  function bestContentRoot(selector) {
+    if (selector) return document.querySelector(selector);
+    var candidates = [];
+    var sels = ['main', '[role="main"]', 'article', '#content', '#main', '.content', '.article', '.post'];
+    for (var s = 0; s < sels.length; s++) {
+      var nodes = document.querySelectorAll(sels[s]);
+      for (var i = 0; i < nodes.length; i++) candidates.push(nodes[i]);
+    }
+    var best = null, bestScore = -1;
+    for (var j = 0; j < candidates.length; j++) {
+      var score = contentScore(candidates[j]);
+      if (score > bestScore) { best = candidates[j]; bestScore = score; }
+    }
+    return best || document.body;
+  }
+
+  function limitText(s, maxChars) {
+    s = cleanText(s);
+    maxChars = maxChars || 0;
+    return maxChars > 0 && s.length > maxChars ? s.slice(0, maxChars) : s;
+  }
+
+  globalThis.__textClean = function (opts) {
+    opts = opts || {};
+    var root = bestContentRoot(opts.selector || null);
+    if (!root) return '';
+    return limitText(textFrom(root, { dropChrome: true }), opts.max_chars || opts.maxChars || 0);
+  };
+
+  function matchIndex(haystack, needle, exact) {
+    var h = cleanText(haystack);
+    var n = cleanText(needle);
+    if (!n) return -1;
+    if (exact) return h === n ? 0 : -1;
+    return h.toLowerCase().indexOf(n.toLowerCase());
+  }
+
+  function usefulnessScore(el) {
+    var score = 0;
+    var p = el;
+    while (p && p.nodeType === 1) {
+      var tag = tagName(p);
+      if (tag === 'article') score += 80;
+      else if (tag === 'main') score += 70;
+      else if ((p.getAttribute && p.getAttribute('role')) === 'main') score += 70;
+      else if (tag === 'section') score += 15;
+      else if (CHROME_TEXT_TAGS[tag]) score -= 80;
+      p = p.parentNode;
+    }
+    return score;
+  }
+
+  globalThis.__findText = function (opts) {
+    opts = opts || {};
+    var needle = opts.text || '';
+    var exact = !!opts.exact;
+    var limit = opts.limit || 20;
+    var context = opts.context_chars || opts.contextChars || 80;
+    var roots = opts.selector ? document.querySelectorAll(opts.selector) : [document.body];
+    var hits = [];
+    function visit(node) {
+      if (!node || node.nodeType !== 1 || isHidden(node)) return false;
+      var tag = tagName(node);
+      if (isSkipTag(tag, false)) return false;
+      var full = textFrom(node, { dropChrome: false });
+      if (matchIndex(full, needle, exact) < 0) return false;
+      var childHit = false;
+      for (var i = 0; i < (node.childNodes || []).length; i++) {
+        if (visit(node.childNodes[i])) childHit = true;
+      }
+      if (!childHit) {
+        var idx = matchIndex(full, needle, exact);
+        var m = exact ? full : full.slice(idx, idx + cleanText(needle).length);
+        hits.push({
+          ref: 'e:' + node._id,
+          tag: tag,
+          attrs: attrsOf(node),
+          before: full.slice(Math.max(0, idx - context), idx),
+          match: m,
+          after: full.slice(idx + m.length, idx + m.length + context),
+          text: full,
+          _score: usefulnessScore(node) - Math.min(full.length, 5000) / 10000
+        });
+      }
+      return true;
+    }
+    for (var r = 0; r < roots.length; r++) visit(roots[r]);
+    hits.sort(function (a, b) { return b._score - a._score; });
+    if (hits.length > limit) hits.length = limit;
+    for (var h = 0; h < hits.length; h++) delete hits[h]._score;
+    return hits;
+  };
+
+  globalThis.__textAround = function (opts) {
+    opts = opts || {};
+    var context = opts.context_chars || opts.contextChars || 400;
+    var el = null;
+    if (opts.ref && typeof __byRef === 'function') el = __byRef(opts.ref);
+    if (!el && opts.text) {
+      var found = globalThis.__findText({ text: opts.text, selector: opts.selector,
+        exact: opts.exact, limit: 1, context_chars: context });
+      if (found && found.length && typeof __byRef === 'function') el = __byRef(found[0].ref);
+    }
+    var root = bestContentRoot(opts.selector || null);
+    var full = textFrom(root || document.body, { dropChrome: true });
+    var target = el ? textFrom(el, { dropChrome: true }) : cleanText(opts.text || '');
+    var idx = target ? full.indexOf(target) : -1;
+    if (idx < 0 && opts.text) idx = full.toLowerCase().indexOf(cleanText(opts.text).toLowerCase());
+    if (idx < 0) {
+      var fallback = target || full;
+      return { ref: opts.ref || null, before: '', match: limitText(fallback, context), after: '', text: limitText(fallback, context * 2) };
+    }
+    var match = target || full.slice(idx, idx + cleanText(opts.text).length);
+    return {
+      ref: opts.ref || (el ? 'e:' + el._id : null),
+      before: full.slice(Math.max(0, idx - context), idx),
+      match: match,
+      after: full.slice(idx + match.length, idx + match.length + context),
+      text: full.slice(Math.max(0, idx - context), idx + match.length + context)
+    };
+  };
+
+  function firstMatch(root, selectors) {
+    for (var i = 0; i < selectors.length; i++) {
+      try {
+        var el = root.querySelector(selectors[i]);
+        if (el) return el;
+      } catch (e) {}
+    }
+    return null;
+  }
+
+  function attr(el, name) {
+    return el && el.getAttribute ? el.getAttribute(name) : null;
+  }
+
+  function resolveHref(href) {
+    if (!href) return null;
+    if (typeof __host_resolve_url === 'function') {
+      try {
+        return __host_resolve_url(href, (typeof location !== 'undefined' && location.href) || '') || href;
+      } catch (e) {}
+    }
+    return href;
+  }
+
+  function meaningfulTitle(s) {
+    s = collapseWhitespace(s);
+    if (!s || s.length < 3 || s.length > 180) return '';
+    if (looksLikeImageArtifact(s)) return '';
+    if (/^(learn more|read more|view details|details|shop now|buy now|free trial)$/i.test(s)) return '';
+    return s;
+  }
+
+  function bestAnchor(card) {
+    var anchors = card.querySelectorAll('a[href]');
+    var best = null;
+    var bestScore = -1;
+    for (var i = 0; i < anchors.length; i++) {
+      var a = anchors[i];
+      var title = meaningfulTitle(cleanText(a));
+      var href = attr(a, 'href');
+      if (!href || !title) continue;
+      var score = title.length;
+      if (a.querySelector('h1,h2,h3,h4,[itemprop="name"]')) score += 80;
+      if ((a.getAttribute('class') || '').match(/title|name|card|product|course|recipe/i)) score += 30;
+      if (score > bestScore) {
+        best = { el: a, title: title, url: resolveHref(href), score: score };
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  function cardTitle(card, anchor) {
+    if (anchor && anchor.title) return anchor.title;
+    var el = firstMatch(card, [
+      '[itemprop="name"]', 'h1', 'h2', 'h3', 'h4',
+      '.title', '.card-title', '.product-title', '.course-title', '.recipe-title', '.name'
+    ]);
+    return meaningfulTitle(cleanText(el));
+  }
+
+  function cardSnippet(card, title) {
+    var el = firstMatch(card, [
+      '[itemprop="description"]', '.description', '.summary', '.excerpt', '.snippet',
+      '.dek', '.subtitle', 'p'
+    ]);
+    var text = cleanText(el);
+    if (!text) return null;
+    if (title && text === title) return null;
+    if (title && text.indexOf(title + ' ') === 0) text = collapseWhitespace(text.slice(title.length));
+    if (text.length > 300) text = text.slice(0, 297).replace(/\s+\S*$/, '') + '...';
+    return text || null;
+  }
+
+  function cardMeta(card, title, snippet) {
+    var selectors = [
+      '[itemprop="price"]', '[itemprop="duration"]', '[itemprop="cookTime"]',
+      '[itemprop="prepTime"]', '[itemprop="recipeYield"]', '[itemprop="ratingValue"]',
+      '.price', '.duration', '.time', '.rating', '.reviews', '.level', '.category',
+      '.badge', '.tag', '.meta', 'small'
+    ];
+    var values = [];
+    for (var s = 0; s < selectors.length; s++) {
+      var nodes = [];
+      try { nodes = card.querySelectorAll(selectors[s]); } catch (e) { nodes = []; }
+      for (var i = 0; i < nodes.length && values.length < 8; i++) {
+        var text = cleanText(nodes[i]);
+        if (!text || text === title || text === snippet) continue;
+        if (values.indexOf(text) === -1) values.push(text);
+      }
+    }
+    return values;
+  }
+
+  function cardScore(card, title, anchor, kind) {
+    var score = 0;
+    var tag = (card.tagName || '').toLowerCase();
+    var cls = (card.getAttribute('class') || '') + ' ' + (card.getAttribute('itemtype') || '');
+    if (title) score += 40;
+    if (anchor && anchor.url) score += 25;
+    if (tag === 'article') score += 15;
+    if (/card|product|course|recipe|listing|result|item/i.test(cls)) score += 20;
+    if (kind && cls.toLowerCase().indexOf(kind.toLowerCase()) !== -1) score += 15;
+    if (card.querySelector('img[alt]')) score += 5;
+    var textLen = cleanText(card).length;
+    if (textLen >= 30 && textLen <= 800) score += 10;
+    if (textLen > 1600) score -= 25;
+    return score;
+  }
   // extract_table — pull a <table> into {headers, rows}. Headers come
   // from <thead><th>...</th></thead> if present, else the first <tr>'s
   // <th> cells. Each subsequent <tr>'s <td> cells become a row dict
@@ -414,12 +771,60 @@
         if (attr) {
           rec[name] = el.getAttribute(attr);
         } else {
-          rec[name] = (el.textContent || '').trim();
+          rec[name] = cleanText(el);
         }
       }
       out.push(rec);
     }
     return out;
+  };
+
+  globalThis.__extractCards = function (selector, limit, kind) {
+    limit = limit || 50;
+    var candidates = [];
+    var selectors = selector ? [selector] : [
+      'article', '[itemscope]', '[itemtype*="Product"]', '[itemtype*="Recipe"]',
+      '.card', '.product', '.course', '.recipe', '.listing', '.result',
+      '[class*="card"]', '[class*="product"]', '[class*="course"]',
+      '[class*="recipe"]', '[class*="listing"]', 'li'
+    ];
+    for (var s = 0; s < selectors.length; s++) {
+      var nodes = [];
+      try { nodes = document.querySelectorAll(selectors[s]); } catch (e) { nodes = []; }
+      for (var i = 0; i < nodes.length; i++) {
+        if (candidates.indexOf(nodes[i]) === -1) candidates.push(nodes[i]);
+      }
+    }
+
+    var rows = [];
+    var seen = {};
+    for (var c = 0; c < candidates.length; c++) {
+      var card = candidates[c];
+      var anchor = bestAnchor(card);
+      var title = cardTitle(card, anchor);
+      if (!title) continue;
+      var url = anchor && anchor.url || resolveHref(attr(firstMatch(card, ['a[href]']), 'href'));
+      var snippet = cardSnippet(card, title);
+      var img = firstMatch(card, ['img']);
+      var imageAlt = collapseWhitespace(attr(img, 'alt') || '');
+      if (looksLikeImageArtifact(imageAlt)) imageAlt = '';
+      var score = cardScore(card, title, anchor, kind);
+      if (!selector && score < 55) continue;
+      var key = (url || '') + '\n' + title;
+      if (seen[key]) continue;
+      seen[key] = true;
+      rows.push({
+        title: title,
+        url: url || null,
+        snippet: snippet,
+        meta: cardMeta(card, title, snippet),
+        image_alt: imageAlt || null,
+        score: score
+      });
+    }
+    rows.sort(function (a, b) { return b.score - a.score; });
+    if (rows.length > limit) rows.length = limit;
+    return rows;
   };
 
   globalThis.__extract = function (opts) {

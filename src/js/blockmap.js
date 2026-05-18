@@ -23,6 +23,164 @@
     return (s || '').replace(/\s+/g, ' ').trim();
   }
 
+  function attr(el, name) {
+    var v = el && el.getAttribute && el.getAttribute(name);
+    return v == null || v === '' ? null : String(v);
+  }
+
+  function ref(el) {
+    return el && el._id ? 'e:' + el._id : null;
+  }
+
+  function textOf(node) {
+    return clean(node && node.textContent).slice(0, 120);
+  }
+
+  function labelText(label, skip) {
+    function walk(node) {
+      if (!node || node === skip) return '';
+      if (node.nodeType === 3) return node.textContent || '';
+      if (node.tagName && /^(INPUT|SELECT|TEXTAREA|BUTTON|OPTION)$/.test(node.tagName)) return '';
+      var s = '';
+      var kids = node.childNodes || [];
+      for (var i = 0; i < kids.length; i++) s += ' ' + walk(kids[i]);
+      return s;
+    }
+    return clean(walk(label)).slice(0, 120);
+  }
+
+  function labelFor(el) {
+    if (!el) return null;
+    var aria = attr(el, 'aria-label');
+    if (aria) return clean(aria).slice(0, 120);
+
+    var id = attr(el, 'id');
+    if (id) {
+      var labels = document.getElementsByTagName('label');
+      for (var i = 0; i < labels.length; i++) {
+        if (labels[i].getAttribute('for') === id) {
+          var lt = labelText(labels[i], el) || textOf(labels[i]);
+          if (lt) return lt;
+        }
+      }
+    }
+
+    var n = el.parentNode;
+    while (n && n.tagName) {
+      if (n.tagName === 'LABEL') {
+        var wrapped = labelText(n, el) || textOf(n);
+        if (wrapped) return wrapped;
+      }
+      n = n.parentNode;
+    }
+
+    var ph = attr(el, 'placeholder');
+    if (ph) return clean(ph).slice(0, 120);
+    var name = attr(el, 'name');
+    if (name) return clean(name).slice(0, 120);
+    var title = attr(el, 'title');
+    if (title) return clean(title).slice(0, 120);
+
+    var prev = el.previousSibling;
+    while (prev) {
+      var pt = textOf(prev);
+      if (pt) return pt;
+      prev = prev.previousSibling;
+    }
+    return null;
+  }
+
+  function controlType(el) {
+    var tag = el.tagName.toLowerCase();
+    if (tag === 'input') return (el.getAttribute('type') || 'text').toLowerCase();
+    if (tag === 'button') return (el.getAttribute('type') || 'submit').toLowerCase();
+    return tag;
+  }
+
+  function controlValue(el) {
+    var tag = el.tagName.toLowerCase();
+    if (tag === 'textarea') return el.value != null ? String(el.value) : (el.textContent || '');
+    if (tag === 'select') {
+      var opts = el.getElementsByTagName('option');
+      for (var i = 0; i < opts.length; i++) {
+        if (opts[i].selected) return attr(opts[i], 'value') || textOf(opts[i]);
+      }
+      return opts[0] ? (attr(opts[0], 'value') || textOf(opts[0])) : '';
+    }
+    if (el.value != null) return String(el.value);
+    return attr(el, 'value') || '';
+  }
+
+  function optionSamples(select) {
+    var opts = select.getElementsByTagName('option');
+    var out = [];
+    for (var i = 0; i < opts.length && i < 50; i++) {
+      out.push({
+        ref: ref(opts[i]),
+        text: textOf(opts[i]),
+        value: attr(opts[i], 'value') || textOf(opts[i]),
+        selected: !!opts[i].selected,
+      });
+    }
+    return out;
+  }
+
+  function scoreTarget(el, text) {
+    var score = 0;
+    if (text) score += Math.min(40, text.length);
+    if (attr(el, 'aria-label')) score += 35;
+    if (attr(el, 'title')) score += 15;
+    if (attr(el, 'href') && attr(el, 'href').charAt(0) !== '#') score += 10;
+    var role = attr(el, 'role');
+    if (role === 'button' || role === 'link') score += 8;
+    if (/^(click|here|more|read more|learn more)$/i.test(text || '')) score -= 20;
+    if (!text && !attr(el, 'aria-label') && !attr(el, 'title')) score -= 30;
+    return score;
+  }
+
+  function resolveUrl(url) {
+    if (!url) return location.href;
+    if (typeof __host_resolve_url === 'function') {
+      try { return __host_resolve_url(url, location.href || ''); } catch (e) {}
+    }
+    if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return url;
+    if (url.charAt(0) === '/') return location.origin + url;
+    var base = location.href || '';
+    return base.slice(0, base.lastIndexOf('/') + 1) + url;
+  }
+
+  function isPasswordLike(name, type) {
+    return type === 'password' || /pass(word)?|token|secret|credential/i.test(name || '');
+  }
+
+  function serializeControl(el) {
+    var tag = el.tagName.toLowerCase();
+    var type = controlType(el);
+    var out = {
+      ref: ref(el),
+      tag: tag,
+      type: type,
+      name: attr(el, 'name'),
+      label: labelFor(el),
+      placeholder: attr(el, 'placeholder'),
+      value: controlValue(el),
+    };
+    if (type === 'checkbox' || type === 'radio') out.checked = !!el.checked;
+    if (tag === 'select') {
+      out.selected = controlValue(el);
+      out.options = optionSamples(el);
+    }
+    return out;
+  }
+
+  function submitReason(el, score) {
+    var t = (textOf(el) || attr(el, 'value') || '').toLowerCase();
+    var type = controlType(el);
+    if (type === 'submit') return 'submit_type';
+    if (/search|go|submit|send|apply|continue|next|sign in|login/.test(t)) return 'action_text';
+    return score > 0 ? 'button_candidate' : 'low_signal';
+  }
+
   function summarize(el) {
     var counts = {
       links: el.getElementsByTagName('a').length,
@@ -117,15 +275,98 @@
         value: inp.getAttribute('value') || null,
       });
     }
+
+    var linkSamples = [];
+    for (var li = 0; li < links.length; li++) {
+      var link = links[li];
+      var linkText = textOf(link) || labelFor(link) || attr(link, 'title') || attr(link, 'href') || '';
+      linkSamples.push({
+        ref: ref(link),
+        text: linkText,
+        href: attr(link, 'href'),
+        aria_label: attr(link, 'aria-label'),
+        title: attr(link, 'title'),
+        role: attr(link, 'role'),
+        score: scoreTarget(link, linkText),
+      });
+    }
+    linkSamples.sort(function(a, b) { return b.score - a.score; });
+    linkSamples = linkSamples.slice(0, 50);
+
+    var buttonEls = [];
+    for (var bi = 0; bi < buttons.length; bi++) buttonEls.push(buttons[bi]);
+    var inputButtons = body.querySelectorAll('input[type=button], input[type=submit], input[type=reset], input[type=image]');
+    for (var ib = 0; ib < inputButtons.length; ib++) buttonEls.push(inputButtons[ib]);
+    var buttonSamples = [];
+    for (var bs = 0; bs < buttonEls.length; bs++) {
+      var btn = buttonEls[bs];
+      var btnText = textOf(btn) || attr(btn, 'value') || labelFor(btn) || attr(btn, 'title') || '';
+      buttonSamples.push({
+        ref: ref(btn),
+        text: btnText,
+        type: controlType(btn),
+        aria_label: attr(btn, 'aria-label'),
+        title: attr(btn, 'title'),
+        role: attr(btn, 'role'),
+        score: scoreTarget(btn, btnText),
+      });
+    }
+    buttonSamples.sort(function(a, b) { return b.score - a.score; });
+    buttonSamples = buttonSamples.slice(0, 50);
+
     var formEls = body.getElementsByTagName('form');
     var forms = [];
     for (var k = 0; k < formEls.length; k++) {
       var f = formEls[k];
+      var controlsRaw = f.querySelectorAll('input, textarea, select, button');
+      var controls = [];
+      var submitCandidates = [];
+      var previewFields = [];
+      var method = (f.getAttribute('method') || 'get').toLowerCase();
+      for (var ci = 0; ci < controlsRaw.length; ci++) {
+        var control = controlsRaw[ci];
+        var ctl = serializeControl(control);
+        controls.push(ctl);
+
+        var ctype = ctl.type;
+        var isSubmit = (control.tagName === 'BUTTON' && ctype !== 'button' && ctype !== 'reset') ||
+          (control.tagName === 'INPUT' && (ctype === 'submit' || ctype === 'image'));
+        if (isSubmit) {
+          var st = textOf(control) || attr(control, 'value') || labelFor(control) || '';
+          var ss = scoreTarget(control, st) + (ctype === 'submit' ? 30 : 0);
+          submitCandidates.push({
+            ref: ref(control),
+            tag: control.tagName.toLowerCase(),
+            text: st,
+            type: ctype,
+            score: ss,
+            reason: submitReason(control, ss),
+          });
+        }
+
+        if (method === 'get' && ctl.name && ctype !== 'submit' && ctype !== 'button' && ctype !== 'reset' && ctype !== 'image') {
+          if ((ctype === 'checkbox' || ctype === 'radio') && !ctl.checked) continue;
+          previewFields.push({
+            name: ctl.name,
+            value: isPasswordLike(ctl.name, ctype) ? '[REDACTED]' : (ctl.value || ''),
+            type: ctype,
+            redacted: isPasswordLike(ctl.name, ctype),
+          });
+        }
+      }
+      submitCandidates.sort(function(a, b) { return b.score - a.score; });
+      var action = f.getAttribute('action') || location.href || '';
       forms.push({
-        ref: 'e:' + f._id,
+        ref: ref(f),
         action: f.getAttribute('action') || '',
-        method: (f.getAttribute('method') || 'get').toLowerCase(),
+        method: method,
         fields: f.querySelectorAll('input, textarea, select').length,
+        controls: controls,
+        submit_candidates: submitCandidates.slice(0, 10),
+        query_preview: method === 'get' ? {
+          action: resolveUrl(action),
+          fields: previewFields,
+        } : null,
       });
     }
 
@@ -273,6 +514,8 @@
       interactives: {
         links: links.length,
         buttons: buttons.length,
+        link_samples: linkSamples,
+        button_samples: buttonSamples,
         inputs: inputs,
         forms: forms,
       },

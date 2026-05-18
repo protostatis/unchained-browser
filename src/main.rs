@@ -1,4 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -25,6 +27,7 @@ const SHIMS_JS: &str = include_str!("js/shims.js");
 const BLOCKMAP_JS: &str = include_str!("js/blockmap.js");
 const INTERACT_JS: &str = include_str!("js/interact.js");
 const EXTRACT_JS: &str = include_str!("js/extract.js");
+const PAGE_MODEL_JS: &str = include_str!("js/page_model.js");
 
 #[derive(Deserialize)]
 struct Request {
@@ -349,6 +352,9 @@ struct Session {
     // CPU-pegged process behind.
     eval_deadline_ms: Arc<AtomicU64>,
     last_url: Option<String>,
+    last_challenge: Option<Value>,
+    last_rate_limit: Option<Value>,
+    last_browser_route: Option<Value>,
     // Raw HTML body of the most recent navigate, shared with the JS layer
     // via the __host_raw_body() host function. Arc'd so the function closure
     // can read it after the DOM has been mutated by hydration scripts —
@@ -439,6 +445,8 @@ impl Session {
         //                   storage, etc.) — coherent with our Chrome 131 TLS FP
         //   3. blockmap.js — __blockmap() page-summary walker
         //   4. interact.js — __click, __type, __byRef, __formData
+        //   5. extract.js  — text/list/card helpers
+        //   6. page_model.js — semantic page object model
         // Then register host bindings the JS layer references at call time
         // (__host_fetch_send, __host_drain_fetches).
         js_ctx.with(|ctx| -> Result<()> {
@@ -452,6 +460,8 @@ impl Session {
                 .map_err(|e| anyhow!("eval interact.js: {e}"))?;
             ctx.eval::<(), _>(EXTRACT_JS)
                 .map_err(|e| anyhow!("eval extract.js: {e}"))?;
+            ctx.eval::<(), _>(PAGE_MODEL_JS)
+                .map_err(|e| anyhow!("eval page_model.js: {e}"))?;
             // Apply profile-driven navigator.* patches AFTER shims.js
             // installs the base navigator object. Page scripts that read
             // navigator.userAgent / .platform / .languages now see the
@@ -604,7 +614,7 @@ impl Session {
         let bytecode_cache_disabled = bytecode_cache::is_disabled();
         let bytecode_cache_root = bytecode_cache::cache_dir();
         let shim_hash = bytecode_cache::sha256(&format!(
-            "{DOM_JS}\0{SHIMS_JS}\0{BLOCKMAP_JS}\0{INTERACT_JS}"
+            "{DOM_JS}\0{SHIMS_JS}\0{BLOCKMAP_JS}\0{INTERACT_JS}\0{EXTRACT_JS}\0{PAGE_MODEL_JS}"
         ));
         if !bytecode_cache_disabled {
             bytecode_cache::prune(&bytecode_cache_root, bytecode_cache::max_total_bytes());
@@ -618,6 +628,9 @@ impl Session {
             _fetch: fetch,
             eval_deadline_ms,
             last_url: None,
+            last_challenge: None,
+            last_rate_limit: None,
+            last_browser_route: None,
             last_body: last_body_arc,
             policy_block,
             nav_counter: AtomicU64::new(0),
@@ -907,6 +920,10 @@ impl Session {
             );
         }
 
+        let rate_limit_detection = challenge::detect_rate_limit(status, &body, &headers_flat);
+        let rate_limit = rate_limit_detection
+            .as_ref()
+            .map(|d| serde_json::to_value(d).unwrap_or_default());
         let challenge_detection = challenge::detect(status, &body);
         if let Some(d) = &challenge_detection {
             emit_event("challenge", serde_json::to_value(d).unwrap_or_default());
@@ -1527,10 +1544,18 @@ impl Session {
 
         self.last_url = Some(final_url.clone());
         if let Ok(mut g) = self.last_body.lock() {
-            *g = Some(body);
+            *g = Some(body.clone());
         }
 
         let blockmap = self.blockmap().unwrap_or(Value::Null);
+        let browser_route = challenge::detect_browser_route(status, &body, &blockmap);
+        self.last_challenge = challenge.clone();
+        self.last_rate_limit = rate_limit.clone();
+        self.last_browser_route = if challenge.is_none() && rate_limit.is_none() {
+            browser_route.clone()
+        } else {
+            None
+        };
 
         // Auto-extract whenever the page embeds JSON-bearing <script> tags
         // (density.json_scripts > 0). Across a 32-site sweep this delivers
@@ -1659,6 +1684,8 @@ impl Session {
                 "auto_extract_confidence": auto_extract.as_ref().and_then(|e| e.get("confidence")),
                 "auto_extract_truncated": auto_extract.as_ref().and_then(|e| e.get("truncated")),
                 "auto_extract_error": auto_extract_error,
+                "rate_limit": rate_limit.clone(),
+                "browser_route": browser_route.clone(),
             }),
         );
 
@@ -1694,7 +1721,7 @@ impl Session {
         let extract_for_outcome = auto_extract.clone().unwrap_or(Value::Null);
         let network_for_outcome = network_stores.clone().unwrap_or(Value::Null);
         let challenge_for_outcome = challenge.clone().unwrap_or(Value::Null);
-        let tool_advice = derive_tool_likelihoods(
+        let mut tool_advice = derive_tool_likelihoods(
             status,
             exec_scripts,
             &blockmap,
@@ -1703,6 +1730,7 @@ impl Session {
             &challenge_for_outcome,
             &scripts_for_outcome,
         );
+        apply_browser_route_tool_advice(&mut tool_advice, &browser_route);
         let (success, reasons, signals) = derive_outcome(
             status,
             exec_scripts,
@@ -1752,6 +1780,8 @@ impl Session {
             "headers": Value::Object(headers),
             "blockmap": blockmap,
             "challenge": challenge,
+            "rate_limit": rate_limit,
+            "browser_route": browser_route,
             "scripts": scripts,
             "extract": auto_extract,
             "network_stores": network_stores,
@@ -1764,6 +1794,233 @@ impl Session {
 
     fn blockmap(&self) -> Result<Value> {
         self.eval("__blockmap()")
+    }
+
+    fn network_scope_id(&self, nav_id: Option<&str>) -> Option<String> {
+        match nav_id {
+            Some("all") => None,
+            Some(explicit) => Some(explicit.to_string()),
+            None => self
+                ._fetch
+                .current_nav_id
+                .lock()
+                .ok()
+                .and_then(|g| g.clone()),
+        }
+    }
+
+    fn network_captures(
+        &self,
+        limit: usize,
+        host: Option<&str>,
+        nav_id: Option<&str>,
+    ) -> (Option<String>, Vec<network_store::NetworkCapture>) {
+        let scope_id = self.network_scope_id(nav_id);
+        let captures = self
+            ._fetch
+            .network_store
+            .lock()
+            .map(|s| {
+                let scope = match scope_id.as_deref() {
+                    Some(id) => network_store::NavScope::Only(id),
+                    None => network_store::NavScope::All,
+                };
+                s.ranked(limit, host, scope)
+            })
+            .unwrap_or_default();
+        (scope_id, captures)
+    }
+
+    fn network_counts(&self) -> Value {
+        let current_nav_id = self.network_scope_id(None);
+        self._fetch
+            .network_store
+            .lock()
+            .map(|s| {
+                let current = current_nav_id
+                    .as_deref()
+                    .map(|id| s.summary(0, network_store::NavScope::Only(id)).count)
+                    .unwrap_or(0);
+                let all = s.summary(0, network_store::NavScope::All).count;
+                json!({
+                    "current_nav_id": current_nav_id,
+                    "current_nav_count": current,
+                    "all_count": all,
+                })
+            })
+            .unwrap_or_else(|_| {
+                json!({
+                    "current_nav_id": current_nav_id,
+                    "current_nav_count": 0,
+                    "all_count": 0,
+                })
+            })
+    }
+
+    fn network_extract(
+        &self,
+        query: Option<&str>,
+        types: Option<&Value>,
+        limit: usize,
+        host: Option<&str>,
+        nav_id: Option<&str>,
+    ) -> Result<Value> {
+        let limit = limit.clamp(1, 100);
+        let capture_limit = limit.saturating_mul(4).clamp(20, 100);
+        let (scope_id, captures) = self.network_captures(capture_limit, host, nav_id);
+        let terms = network_terms(query.unwrap_or(""));
+        let allowed = parse_object_type_filter(types);
+        let mut errors = Vec::new();
+        let mut objects = Vec::new();
+
+        for capture in &captures {
+            match extract_network_objects_from_capture(capture, &terms, limit.saturating_mul(12)) {
+                Ok(mut found) => objects.append(&mut found),
+                Err(e) => errors.push(json!({
+                    "capture_id": capture.capture_id,
+                    "url": capture.url,
+                    "error": e,
+                    "body_truncated": capture.body_truncated,
+                })),
+            }
+        }
+
+        if let Some(allowed) = &allowed {
+            objects.retain(|o| network_kind_allowed(&o.kind, allowed));
+        }
+        objects.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        dedupe_network_objects(&mut objects);
+        objects.truncate(limit);
+        let values: Vec<Value> = objects
+            .iter()
+            .enumerate()
+            .map(|(idx, obj)| obj.to_value(idx + 1))
+            .collect();
+
+        Ok(json!({
+            "query": query,
+            "nav_id": scope_id,
+            "host": host,
+            "capture_count": captures.len(),
+            "object_count": values.len(),
+            "objects": values,
+            "errors": errors,
+        }))
+    }
+
+    fn page_model(&self, goal: Option<&str>, types: Option<&Value>, limit: u32) -> Result<Value> {
+        let types = match types {
+            Some(v) if v.is_array() => v.clone(),
+            _ => Value::Null,
+        };
+        let opts = json!({
+            "goal": goal,
+            "types": types,
+            "limit": limit,
+        });
+        let mut model = self.eval(&format!("__pageModel({})", serde_json::to_string(&opts)?))?;
+        self.attach_page_model_network_objects(&mut model, goal, Some(&types), limit as usize);
+        self.attach_page_model_limitations(&mut model);
+        Ok(model)
+    }
+
+    fn route_discover(&self, goal: Option<&str>, limit: u32) -> Result<Value> {
+        let opts = json!({
+            "goal": goal,
+            "limit": limit,
+        });
+        self.eval(&format!(
+            "__routeDiscover({})",
+            serde_json::to_string(&opts)?
+        ))
+    }
+
+    fn attach_page_model_network_objects(
+        &self,
+        model: &mut Value,
+        goal: Option<&str>,
+        types: Option<&Value>,
+        limit: usize,
+    ) {
+        let Ok(network) = self.network_extract(goal, types, limit.clamp(10, 30), None, None) else {
+            return;
+        };
+        let network_objects = network
+            .get("objects")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let network_count = network_objects.as_array().map(|a| a.len()).unwrap_or(0);
+        let capture_count = network
+            .get("capture_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let Some(map) = model.as_object_mut() else {
+            return;
+        };
+        map.insert("network_objects".to_string(), network_objects);
+        if let Some(summary) = map.get_mut("summary").and_then(|v| v.as_object_mut()) {
+            summary.insert("network_objects".to_string(), json!(network_count));
+            summary.insert("network_captures".to_string(), json!(capture_count));
+        }
+    }
+
+    fn attach_page_model_limitations(&self, model: &mut Value) {
+        let Some(map) = model.as_object_mut() else {
+            return;
+        };
+        let mut strict = Vec::new();
+        if let Some(challenge) = &self.last_challenge {
+            strict.push(json!({
+                "kind": "limitation",
+                "reason": "challenge_required",
+                "confidence": challenge.get("confidence").cloned().unwrap_or(json!(0.9)),
+                "provider": challenge.get("provider").cloned().unwrap_or(Value::Null),
+                "evidence": ["navigate.challenge"],
+                "hint": challenge.get("hint").cloned().unwrap_or_else(|| json!("The page returned a challenge before useful content could be modeled.")),
+            }));
+        } else if let Some(rate_limit) = &self.last_rate_limit {
+            strict.push(json!({
+                "kind": "limitation",
+                "reason": "rate_limited",
+                "confidence": 0.9,
+                "status": rate_limit.get("status").cloned().unwrap_or(Value::Null),
+                "retry_after": rate_limit.get("retry_after").cloned().unwrap_or(Value::Null),
+                "retry_after_seconds": rate_limit.get("retry_after_seconds").cloned().unwrap_or(Value::Null),
+                "evidence": ["navigate.rate_limit"],
+                "hint": rate_limit.get("hint").cloned().unwrap_or_else(|| json!("Back off and retry later.")),
+            }));
+        } else if let Some(route) = &self.last_browser_route {
+            strict.push(json!({
+                "kind": "limitation",
+                "reason": route.get("reason").cloned().unwrap_or_else(|| json!("unbrowser_limit")),
+                "confidence": route.get("confidence").cloned().unwrap_or(json!(0.7)),
+                "evidence": route.get("evidence").cloned().unwrap_or_else(|| json!(["navigate.browser_route"])),
+                "hint": "Strict unbrowser could not find a non-rendered content/action surface for this page.",
+            }));
+        }
+
+        if strict.is_empty() {
+            return;
+        }
+        let limitations = map
+            .entry("limitations".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let mut limitation_count = None;
+        if let Some(arr) = limitations.as_array_mut() {
+            arr.extend(strict);
+            limitation_count = Some(arr.len());
+        }
+        if let Some(count) = limitation_count
+            && let Some(summary) = map.get_mut("summary").and_then(|v| v.as_object_mut())
+        {
+            summary.insert("limitations".to_string(), json!(count));
+        }
     }
 
     // Auto-strategy extraction. Tries JSON-LD → __NEXT_DATA__ → Nuxt →
@@ -1793,6 +2050,67 @@ impl Session {
         let item_lit = serde_json::to_string(item)?;
         let fields_lit = serde_json::to_string(fields)?;
         self.eval(&format!("__extractList({item_lit}, {fields_lit}, {limit})"))
+    }
+
+    // Auto-detect repeated cards/articles/products/courses and normalize to
+    // {title, url, snippet, meta, image_alt, score}. A selector can scope or
+    // override detection when the page has a known card container.
+    fn extract_cards(
+        &self,
+        selector: Option<&str>,
+        limit: u32,
+        kind: Option<&str>,
+    ) -> Result<Value> {
+        let selector_lit = match selector {
+            Some(s) => serde_json::to_string(s)?,
+            None => "null".to_string(),
+        };
+        let kind_lit = match kind {
+            Some(k) => serde_json::to_string(k)?,
+            None => "null".to_string(),
+        };
+        self.eval(&format!(
+            "__extractCards({selector_lit}, {limit}, {kind_lit})"
+        ))
+    }
+
+    fn text_clean(&self, selector: Option<&str>, max_chars: Option<u32>) -> Result<Value> {
+        let opts = json!({ "selector": selector, "max_chars": max_chars });
+        self.eval(&format!("__textClean({})", serde_json::to_string(&opts)?))
+    }
+
+    fn find_text(
+        &self,
+        text: &str,
+        selector: Option<&str>,
+        exact: bool,
+        limit: u32,
+        context_chars: u32,
+    ) -> Result<Value> {
+        let opts = json!({
+            "text": text,
+            "selector": selector,
+            "exact": exact,
+            "limit": limit,
+            "context_chars": context_chars,
+        });
+        self.eval(&format!("__findText({})", serde_json::to_string(&opts)?))
+    }
+
+    fn text_around(
+        &self,
+        ref_: Option<&str>,
+        text: Option<&str>,
+        selector: Option<&str>,
+        context_chars: u32,
+    ) -> Result<Value> {
+        let opts = json!({
+            "ref": ref_,
+            "text": text,
+            "selector": selector,
+            "context_chars": context_chars,
+        });
+        self.eval(&format!("__textAround({})", serde_json::to_string(&opts)?))
     }
 
     // Drain the JS event loop: alternately runs queued microtasks (Promise
@@ -2144,6 +2462,173 @@ impl Session {
         self.eval(code)
     }
 
+    fn activation_target_by_text(&self, text: &str) -> Result<Option<Value>> {
+        let needle = serde_json::to_string(text)?;
+        let code = format!(
+            r#"(function(needle) {{
+                function clean(s) {{ return String(s || '').replace(/\s+/g, ' ').trim(); }}
+                function attr(el, name) {{ return el && el.getAttribute ? el.getAttribute(name) : null; }}
+                function label(el) {{
+                    var tag = (el.tagName || '').toLowerCase();
+                    var parts = [el.textContent, attr(el, 'aria-label'), attr(el, 'title')];
+                    if (tag === 'input' || tag === 'button') parts.push(el.value, attr(el, 'value'), attr(el, 'placeholder'));
+                    return clean(parts.filter(Boolean).join(' '));
+                }}
+                var q = clean(needle).toLowerCase();
+                if (!q) return null;
+                var nodes = document.querySelectorAll('a[href], button, input[type="button"], input[type="submit"], input[type="image"], [role="button"], [role="link"], summary, label');
+                var hits = [];
+                for (var i = 0; i < nodes.length; i++) {{
+                    var el = nodes[i];
+                    var text = label(el);
+                    if (!text || text.toLowerCase().indexOf(q) === -1) continue;
+                    var tag = (el.tagName || '').toLowerCase();
+                    var score = 1;
+                    if (text.toLowerCase() === q) score += 4;
+                    if (tag === 'button' || tag === 'a') score += 3;
+                    if (attr(el, 'role') === 'button' || attr(el, 'role') === 'link') score += 2;
+                    hits.push({{ el: el, score: score, text: text }});
+                }}
+                hits.sort(function(a, b) {{ return b.score - a.score; }});
+                if (!hits.length) return null;
+                var best = hits[0].el;
+                return {{
+                    ref: 'e:' + best._id,
+                    tag: (best.tagName || '').toLowerCase(),
+                    attrs: best._attributes || {{}},
+                    text: hits[0].text.slice(0, 200),
+                    source: 'text'
+                }};
+            }})({needle})"#
+        );
+        let value = self.eval(&code)?;
+        if value.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(value))
+        }
+    }
+
+    fn activation_snapshot(&self) -> Result<Value> {
+        let blockmap = self.blockmap().unwrap_or(Value::Null);
+        let blockmap_summary = summarize_blockmap_for_activation(&blockmap);
+        let page_model_summary = self
+            .page_model(None, None, 20)
+            .ok()
+            .and_then(|v| v.get("summary").cloned())
+            .unwrap_or(Value::Null);
+        let text = self
+            .text_clean(None, Some(8000))
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let text_hash = hash_string(&text);
+        let network = self.network_counts();
+        let url = self.last_url.clone();
+        let dom_hash = hash_value(&json!({
+            "url": url,
+            "blockmap": blockmap_summary.clone(),
+            "text_hash": text_hash,
+        }));
+        Ok(json!({
+            "url": url,
+            "title": blockmap.get("title").cloned().unwrap_or(Value::Null),
+            "blockmap": blockmap_summary,
+            "page_model": page_model_summary,
+            "network": network,
+            "text_hash": text_hash,
+            "dom_hash": dom_hash,
+        }))
+    }
+
+    async fn activate(&mut self, ref_: Option<&str>, text: Option<&str>) -> Result<Value> {
+        if ref_.is_none() && text.is_none() {
+            return Err(anyhow!("missing 'ref' or 'text'"));
+        }
+        let before = self.activation_snapshot()?;
+        let target = if let Some(r) = ref_ {
+            json!({ "ref": r, "source": "ref" })
+        } else if let Some(t) = text {
+            match self.activation_target_by_text(t)? {
+                Some(v) => v,
+                None => {
+                    return Ok(json!({
+                        "ok": false,
+                        "classification": "unsupported",
+                        "reason": "no_actionable_text_match",
+                        "requested": { "ref": ref_, "text": text },
+                        "before": before,
+                        "after": before,
+                    }));
+                }
+            }
+        } else {
+            unreachable!();
+        };
+        let target_ref = target
+            .get("ref")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("activation target has no ref"))?
+            .to_string();
+
+        let click_result = self.click(&target_ref).await?;
+        let settle_result = self
+            .settle(1500, 50)
+            .await
+            .unwrap_or_else(|e| json!({ "error": e.to_string() }));
+        let after = self.activation_snapshot()?;
+        let click_ok = click_result
+            .get("ok")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let before_url = before.get("url").and_then(|v| v.as_str());
+        let after_url = after.get("url").and_then(|v| v.as_str());
+        let before_hash = before.get("dom_hash").and_then(|v| v.as_str());
+        let after_hash = after.get("dom_hash").and_then(|v| v.as_str());
+        let before_network = before
+            .get("network")
+            .and_then(|v| v.get("all_count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let after_network = after
+            .get("network")
+            .and_then(|v| v.get("all_count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let url_changed = before_url != after_url;
+        let dom_changed = before_hash != after_hash;
+        let network_changed = after_network > before_network;
+        let network_delta = after_network.saturating_sub(before_network);
+        let classification = if !click_ok {
+            "unsupported"
+        } else if url_changed {
+            "navigated"
+        } else if dom_changed {
+            "dom_changed"
+        } else if network_changed {
+            "network_changed"
+        } else {
+            "no_effect"
+        };
+
+        Ok(json!({
+            "ok": click_ok,
+            "classification": classification,
+            "requested": { "ref": ref_, "text": text },
+            "target": target,
+            "click": click_result,
+            "settle": settle_result,
+            "before": before,
+            "after": after,
+            "signals": {
+                "url_changed": url_changed,
+                "dom_changed": dom_changed,
+                "network_changed": network_changed,
+                "network_delta": network_delta,
+            },
+        }))
+    }
+
     async fn click(&mut self, ref_: &str) -> Result<Value> {
         let lit = serde_json::to_string(ref_)?;
         let result = self.eval(&format!("__click({lit})"))?;
@@ -2256,6 +2741,592 @@ impl Session {
             .map_err(|e| anyhow!("join '{href}': {e}"))?
             .to_string())
     }
+}
+
+#[derive(Debug, Clone)]
+struct NetworkObjectCandidate {
+    kind: String,
+    title: Option<String>,
+    url: Option<String>,
+    text: Option<String>,
+    fields: serde_json::Map<String, Value>,
+    score: f64,
+    confidence: f64,
+    matched_terms: Vec<String>,
+    capture_id: u64,
+    capture_url: String,
+    source_kind: String,
+    path: String,
+}
+
+impl NetworkObjectCandidate {
+    fn to_value(&self, id: usize) -> Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("id".to_string(), json!(format!("net:{id}")));
+        obj.insert("kind".to_string(), json!(self.kind));
+        if let Some(title) = &self.title {
+            obj.insert("title".to_string(), json!(title));
+        }
+        if let Some(url) = &self.url {
+            obj.insert("url".to_string(), json!(url));
+            obj.insert(
+                "actions".to_string(),
+                json!([{ "kind": "open", "url": url }]),
+            );
+        }
+        if let Some(text) = &self.text {
+            obj.insert("text".to_string(), json!(text));
+            obj.insert("snippet".to_string(), json!(text));
+        }
+        obj.insert("fields".to_string(), Value::Object(self.fields.clone()));
+        obj.insert("score".to_string(), json!(round3(self.score)));
+        obj.insert("confidence".to_string(), json!(round3(self.confidence)));
+        obj.insert("matched_terms".to_string(), json!(self.matched_terms));
+        obj.insert(
+            "provenance".to_string(),
+            json!([{
+                "source": "network",
+                "capture_id": self.capture_id,
+                "url": self.capture_url,
+                "kind": self.source_kind,
+                "path": self.path,
+                "reason": "content-bearing JSON object"
+            }]),
+        );
+        Value::Object(obj)
+    }
+}
+
+fn parse_object_type_filter(types: Option<&Value>) -> Option<HashSet<String>> {
+    let set: HashSet<String> = types?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(|s| s.to_string())
+        .collect();
+    if set.is_empty() { None } else { Some(set) }
+}
+
+fn network_kind_allowed(kind: &str, allowed: &HashSet<String>) -> bool {
+    allowed.contains(kind)
+        || (kind.ends_with("_card") && allowed.contains("card"))
+        || (kind == "network_object" && allowed.contains("network_objects"))
+}
+
+fn dedupe_network_objects(objects: &mut Vec<NetworkObjectCandidate>) {
+    let mut seen = HashSet::new();
+    objects.retain(|obj| {
+        let key = format!(
+            "{}\n{}\n{}",
+            obj.title.as_deref().unwrap_or(""),
+            obj.url.as_deref().unwrap_or(""),
+            obj.text.as_deref().unwrap_or("")
+        );
+        if key.trim().is_empty() {
+            return true;
+        }
+        seen.insert(key)
+    });
+}
+
+fn extract_network_objects_from_capture(
+    capture: &network_store::NetworkCapture,
+    terms: &[String],
+    max_objects: usize,
+) -> std::result::Result<Vec<NetworkObjectCandidate>, String> {
+    let mut roots = Vec::new();
+    if matches!(capture.kind, network_store::ContentKind::Ndjson) {
+        for (idx, line) in capture.body_preview.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(trimmed)
+                .map_err(|e| format!("parse ndjson line {}: {e}", idx + 1))?;
+            roots.push((value, format!("$[{idx}]")));
+        }
+    } else {
+        let value: Value = serde_json::from_str(&capture.body_preview).map_err(|e| {
+            if capture.body_truncated {
+                format!("body_preview is truncated and does not parse as JSON: {e}")
+            } else {
+                format!("parse json: {e}")
+            }
+        })?;
+        roots.push((value, "$".to_string()));
+    }
+
+    let mut out = Vec::new();
+    let mut visited = 0usize;
+    let max_nodes = max_objects.saturating_mul(80).max(400);
+    for (value, path) in &roots {
+        collect_network_candidates(
+            value,
+            path,
+            capture,
+            terms,
+            &mut out,
+            &mut visited,
+            max_nodes,
+            max_objects,
+        );
+        if out.len() >= max_objects {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+fn collect_network_candidates(
+    value: &Value,
+    path: &str,
+    capture: &network_store::NetworkCapture,
+    terms: &[String],
+    out: &mut Vec<NetworkObjectCandidate>,
+    visited: &mut usize,
+    max_nodes: usize,
+    max_objects: usize,
+) {
+    if *visited >= max_nodes || out.len() >= max_objects {
+        return;
+    }
+    *visited += 1;
+    match value {
+        Value::Object(map) => {
+            if let Some(candidate) = network_candidate_from_object(map, path, capture, terms) {
+                out.push(candidate);
+                if out.len() >= max_objects {
+                    return;
+                }
+            }
+            for (key, child) in map {
+                if matches!(child, Value::Array(_) | Value::Object(_)) {
+                    let child_path = json_path_child(path, key);
+                    collect_network_candidates(
+                        child,
+                        &child_path,
+                        capture,
+                        terms,
+                        out,
+                        visited,
+                        max_nodes,
+                        max_objects,
+                    );
+                    if *visited >= max_nodes || out.len() >= max_objects {
+                        return;
+                    }
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for (idx, child) in arr.iter().take(250).enumerate() {
+                let child_path = format!("{path}[{idx}]");
+                collect_network_candidates(
+                    child,
+                    &child_path,
+                    capture,
+                    terms,
+                    out,
+                    visited,
+                    max_nodes,
+                    max_objects,
+                );
+                if *visited >= max_nodes || out.len() >= max_objects {
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn network_candidate_from_object(
+    map: &serde_json::Map<String, Value>,
+    path: &str,
+    capture: &network_store::NetworkCapture,
+    terms: &[String],
+) -> Option<NetworkObjectCandidate> {
+    let fields = summarize_network_fields(map);
+    if fields.is_empty() {
+        return None;
+    }
+
+    let text = first_scalar_field(
+        map,
+        &[
+            "description",
+            "summary",
+            "snippet",
+            "excerpt",
+            "text",
+            "body",
+            "content",
+            "caption",
+            "abstract",
+        ],
+    );
+    let mut title = first_scalar_field(
+        map,
+        &[
+            "title",
+            "name",
+            "headline",
+            "label",
+            "displayname",
+            "fullname",
+            "modelid",
+            "model",
+            "question",
+            "term",
+            "id",
+        ],
+    );
+    if title.is_none() {
+        title = text.as_ref().map(|s| truncate_clean(s, 90));
+    }
+    let raw_url = first_scalar_field(
+        map,
+        &[
+            "url",
+            "href",
+            "link",
+            "permalink",
+            "htmlurl",
+            "canonicalurl",
+            "weburl",
+            "externalurl",
+        ],
+    );
+    let url = raw_url
+        .as_deref()
+        .and_then(|u| resolve_json_url(u, &capture.url));
+
+    let field_text = serde_json::to_string(&fields).unwrap_or_default();
+    let combined = format!(
+        "{} {} {} {} {}",
+        path,
+        title.as_deref().unwrap_or(""),
+        url.as_deref().unwrap_or(""),
+        text.as_deref().unwrap_or(""),
+        field_text
+    );
+    let matched_terms = network_matched_terms(&combined, terms);
+    if title.is_none() && url.is_none() && text.is_none() && matched_terms.is_empty() {
+        return None;
+    }
+    if title.as_deref().unwrap_or("").len() < 2 && fields.len() < 2 {
+        return None;
+    }
+
+    let kind =
+        infer_network_object_kind(map, title.as_deref(), url.as_deref(), text.as_deref(), path);
+    let term_boost = if terms.is_empty() {
+        0.0
+    } else {
+        (matched_terms.len() as f64 / terms.len() as f64 * 0.35).min(0.35)
+    };
+    let mut score = 0.36 + (capture.score.min(120) as f64 / 1000.0) + term_boost;
+    if title.is_some() {
+        score += 0.14;
+    }
+    if text.is_some() {
+        score += 0.07;
+    }
+    if url.is_some() {
+        score += 0.05;
+    }
+    if kind != "network_object" {
+        score += 0.08;
+    }
+    if fields.len() >= 4 {
+        score += 0.04;
+    }
+    let confidence = (0.48
+        + if title.is_some() { 0.12 } else { 0.0 }
+        + if text.is_some() { 0.08 } else { 0.0 }
+        + if kind != "network_object" { 0.08 } else { 0.0 }
+        + (capture.score.min(100) as f64 / 1000.0))
+        .min(0.94);
+
+    Some(NetworkObjectCandidate {
+        kind,
+        title,
+        url,
+        text: text.map(|s| truncate_clean(&s, 500)),
+        fields,
+        score: score.min(1.0),
+        confidence,
+        matched_terms,
+        capture_id: capture.capture_id,
+        capture_url: capture.url.clone(),
+        source_kind: serde_json::to_value(capture.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| format!("{:?}", capture.kind)),
+        path: path.to_string(),
+    })
+}
+
+fn summarize_network_fields(
+    map: &serde_json::Map<String, Value>,
+) -> serde_json::Map<String, Value> {
+    let mut fields = serde_json::Map::new();
+    for (key, value) in map {
+        if fields.len() >= 24 {
+            break;
+        }
+        let summary = if is_sensitive_field(key) {
+            Some(json!("[REDACTED]"))
+        } else {
+            summarize_network_value(value)
+        };
+        if let Some(summary) = summary {
+            fields.insert(key.clone(), summary);
+        }
+    }
+    fields
+}
+
+fn summarize_network_value(value: &Value) -> Option<Value> {
+    match value {
+        Value::String(s) => Some(json!(truncate_clean(s, 500))),
+        Value::Number(_) | Value::Bool(_) => Some(value.clone()),
+        Value::Array(arr) => {
+            let values: Vec<Value> = arr
+                .iter()
+                .filter_map(|v| match v {
+                    Value::String(s) => Some(json!(truncate_clean(s, 160))),
+                    Value::Number(_) | Value::Bool(_) => Some(v.clone()),
+                    _ => None,
+                })
+                .take(12)
+                .collect();
+            if values.is_empty() {
+                None
+            } else {
+                Some(Value::Array(values))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn first_scalar_field(map: &serde_json::Map<String, Value>, wanted: &[&str]) -> Option<String> {
+    for want in wanted {
+        for (key, value) in map {
+            if normalized_key(key) == *want && !is_sensitive_field(key) {
+                let text = scalar_to_string(value)?;
+                if !text.is_empty() {
+                    return Some(truncate_clean(&text, 240));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn scalar_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(clean_ws(s)),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn infer_network_object_kind(
+    map: &serde_json::Map<String, Value>,
+    title: Option<&str>,
+    url: Option<&str>,
+    text: Option<&str>,
+    path: &str,
+) -> String {
+    let keys = map.keys().cloned().collect::<Vec<_>>().join(" ");
+    let hay = format!(
+        "{} {} {} {} {}",
+        keys,
+        title.unwrap_or(""),
+        url.unwrap_or(""),
+        text.unwrap_or(""),
+        path
+    )
+    .to_lowercase();
+    if hay.contains("huggingface")
+        || hay.contains("pipeline_tag")
+        || hay.contains("modelid")
+        || hay.contains("model_id")
+        || title.map(|t| t.contains('/')).unwrap_or(false)
+    {
+        return "model_card".to_string();
+    }
+    if hay.contains("course")
+        || hay.contains("instructor")
+        || hay.contains("enroll")
+        || hay.contains("university")
+    {
+        return "course_card".to_string();
+    }
+    if hay.contains("price")
+        || hay.contains("sku")
+        || hay.contains("product")
+        || hay.contains("rating")
+        || hay.contains("brand")
+    {
+        return "product_card".to_string();
+    }
+    if hay.contains("headline")
+        || hay.contains("article")
+        || hay.contains("datepublished")
+        || hay.contains("date_published")
+        || hay.contains("author")
+        || hay.contains("news")
+        || hay.contains("story")
+    {
+        return "article_card".to_string();
+    }
+    "network_object".to_string()
+}
+
+fn network_terms(input: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for raw in input
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .map(|s| s.to_ascii_lowercase())
+    {
+        if raw.len() <= 2 || is_network_stop_word(&raw) || terms.contains(&raw) {
+            continue;
+        }
+        terms.push(raw);
+    }
+    terms
+}
+
+fn network_matched_terms(haystack: &str, terms: &[String]) -> Vec<String> {
+    let haystack = haystack.to_ascii_lowercase();
+    terms
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn is_network_stop_word(term: &str) -> bool {
+    matches!(
+        term,
+        "the"
+            | "and"
+            | "for"
+            | "with"
+            | "from"
+            | "that"
+            | "this"
+            | "into"
+            | "what"
+            | "when"
+            | "where"
+            | "find"
+            | "list"
+            | "show"
+            | "many"
+            | "currently"
+            | "available"
+            | "make"
+            | "sure"
+            | "can"
+            | "perform"
+            | "give"
+            | "get"
+    )
+}
+
+fn is_sensitive_field(key: &str) -> bool {
+    let key = normalized_key(key);
+    key.contains("password")
+        || key.contains("passwd")
+        || key.contains("token")
+        || key.contains("secret")
+        || key.contains("credential")
+        || key.contains("session")
+        || key.contains("cookie")
+        || key.contains("authorization")
+}
+
+fn normalized_key(key: &str) -> String {
+    key.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+fn json_path_child(path: &str, key: &str) -> String {
+    if key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        format!("{path}.{key}")
+    } else {
+        format!("{path}[{}]", serde_json::to_string(key).unwrap_or_default())
+    }
+}
+
+fn resolve_json_url(raw: &str, base: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.starts_with("javascript:") || raw.starts_with("data:") {
+        return None;
+    }
+    if let Ok(parsed) = url::Url::parse(raw)
+        && parsed.has_host()
+    {
+        return Some(parsed.to_string());
+    }
+    url::Url::parse(base)
+        .ok()
+        .and_then(|base| base.join(raw).ok())
+        .map(|u| u.to_string())
+}
+
+fn clean_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_clean(s: &str, max: usize) -> String {
+    let cleaned = clean_ws(s);
+    if cleaned.len() <= max {
+        return cleaned;
+    }
+    let mut end = max.saturating_sub(3);
+    while end > 0 && !cleaned.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", cleaned[..end].trim_end())
+}
+
+fn round3(n: f64) -> f64 {
+    (n * 1000.0).round() / 1000.0
+}
+
+fn hash_string(s: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn hash_value(value: &Value) -> String {
+    hash_string(&serde_json::to_string(value).unwrap_or_default())
+}
+
+fn summarize_blockmap_for_activation(blockmap: &Value) -> Value {
+    let interactives = blockmap.get("interactives").unwrap_or(&Value::Null);
+    json!({
+        "title": blockmap.get("title").cloned().unwrap_or(Value::Null),
+        "structure_count": blockmap.get("structure").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+        "heading_count": blockmap.get("headings").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+        "links": interactives.get("links").and_then(|v| v.as_u64()).unwrap_or(0),
+        "buttons": interactives.get("buttons").and_then(|v| v.as_u64()).unwrap_or(0),
+        "inputs": interactives.get("inputs").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+        "forms": interactives.get("forms").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+        "density": blockmap.get("density").cloned().unwrap_or(Value::Null),
+    })
 }
 
 // Search engines wrap result links in tracker URLs (so they can record
@@ -3282,6 +4353,15 @@ fn derive_tool_likelihoods(
         - 0.10 * bool_score(thin_shell)
         - 0.05 * challenge_score;
 
+    let extract_cards_score = 0.05
+        + 1.35 * list_signal
+        + 0.30 * normalized_count(li_total, 20.0)
+        + 0.30 * main_heading_signal
+        + 0.20 * selector_signal
+        + 0.10 * page_structure
+        - 0.10 * bool_score(thin_shell)
+        - 0.05 * challenge_score;
+
     let network_stores_score = 0.05
         + 1.10 * network_signal
         + 0.15 * network_bytes_signal
@@ -3316,6 +4396,7 @@ fn derive_tool_likelihoods(
         ("extract", extract_score),
         ("extract_table", extract_table_score),
         ("extract_list", extract_list_score),
+        ("extract_cards", extract_cards_score),
         ("network_stores", network_stores_score),
         ("click", click_score),
         ("type", type_score),
@@ -3333,6 +4414,43 @@ fn derive_tool_likelihoods(
         "tool_likelihoods": tool_likelihoods,
         "tool_recommendations": top.into_iter().map(|(name, _)| name).collect::<Vec<_>>(),
     })
+}
+
+fn apply_browser_route_tool_advice(tool_advice: &mut Value, browser_route: &Option<Value>) {
+    let Some(route) = browser_route else {
+        return;
+    };
+    if !route
+        .get("needed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let confidence = route
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    if confidence < 0.70 {
+        return;
+    }
+    if let Some(likelihoods) = tool_advice
+        .get_mut("tool_likelihoods")
+        .and_then(|v| v.as_object_mut())
+    {
+        let current = likelihoods
+            .get("chrome_escalation")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        likelihoods.insert("chrome_escalation".into(), json!(current.max(confidence)));
+    }
+    if let Some(recs) = tool_advice
+        .get_mut("tool_recommendations")
+        .and_then(|v| v.as_array_mut())
+    {
+        recs.retain(|v| v.as_str() != Some("chrome_escalation"));
+        recs.insert(0, Value::String("chrome_escalation".into()));
+    }
 }
 
 // Phase A: validated outcome reporting. Shared between rpc_main and
@@ -3622,6 +4740,62 @@ async fn rpc_main(profile: Profile) -> Result<()> {
                 Ok(v) => ok_response(id, v),
                 Err(e) => err_response(id, -5, e.to_string()),
             },
+            "text_clean" => {
+                let selector = req.params.get("selector").and_then(|v| v.as_str());
+                let max_chars = req
+                    .params
+                    .get("max_chars")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+                match session.text_clean(selector, max_chars) {
+                    Ok(v) => ok_response(id, v),
+                    Err(e) => err_response(id, -5, e.to_string()),
+                }
+            }
+            "find_text" => {
+                let text = req.params.get("text").and_then(|v| v.as_str());
+                let selector = req.params.get("selector").and_then(|v| v.as_str());
+                let exact = req
+                    .params
+                    .get("exact")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let limit = req
+                    .params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(20) as u32;
+                let context_chars = req
+                    .params
+                    .get("context_chars")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(80) as u32;
+                match text {
+                    Some(t) => match session.find_text(t, selector, exact, limit, context_chars) {
+                        Ok(v) => ok_response(id, v),
+                        Err(e) => err_response(id, -5, e.to_string()),
+                    },
+                    None => err_response(id, -32602, "missing 'text' param"),
+                }
+            }
+            "text_around" => {
+                let ref_ = req.params.get("ref").and_then(|v| v.as_str());
+                let text = req.params.get("text").and_then(|v| v.as_str());
+                let selector = req.params.get("selector").and_then(|v| v.as_str());
+                let context_chars = req
+                    .params
+                    .get("context_chars")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(400) as u32;
+                if ref_.is_none() && text.is_none() {
+                    err_response(id, -32602, "missing 'ref' or 'text' param")
+                } else {
+                    match session.text_around(ref_, text, selector, context_chars) {
+                        Ok(v) => ok_response(id, v),
+                        Err(e) => err_response(id, -5, e.to_string()),
+                    }
+                }
+            }
             "query_text" => {
                 let text = req.params.get("text").and_then(|v| v.as_str());
                 let selector = req.params.get("selector").and_then(|v| v.as_str());
@@ -3647,6 +4821,50 @@ async fn rpc_main(profile: Profile) -> Result<()> {
                 Ok(v) => ok_response(id, v),
                 Err(e) => err_response(id, -6, e.to_string()),
             },
+            "page_model" => {
+                let goal = req.params.get("goal").and_then(|v| v.as_str());
+                let types = req.params.get("types");
+                let limit = req
+                    .params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(50) as u32;
+                match session.page_model(goal, types, limit) {
+                    Ok(v) => ok_response(id, v),
+                    Err(e) => err_response(id, -6, e.to_string()),
+                }
+            }
+            "route_discover" => {
+                let goal = req.params.get("goal").and_then(|v| v.as_str());
+                let limit = req
+                    .params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(30) as u32;
+                match session.route_discover(goal, limit) {
+                    Ok(v) => ok_response(id, v),
+                    Err(e) => err_response(id, -6, e.to_string()),
+                }
+            }
+            "network_extract" => {
+                let query = req
+                    .params
+                    .get("query")
+                    .or_else(|| req.params.get("goal"))
+                    .and_then(|v| v.as_str());
+                let types = req.params.get("types");
+                let limit = req
+                    .params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(50) as usize;
+                let host = req.params.get("host").and_then(|v| v.as_str());
+                let nav_id = req.params.get("nav_id").and_then(|v| v.as_str());
+                match session.network_extract(query, types, limit, host, nav_id) {
+                    Ok(v) => ok_response(id, v),
+                    Err(e) => err_response(id, -6, e.to_string()),
+                }
+            }
             "extract" => {
                 let strategy = req.params.get("strategy").and_then(|v| v.as_str());
                 match session.extract(strategy) {
@@ -3677,6 +4895,19 @@ async fn rpc_main(profile: Profile) -> Result<()> {
                     _ => err_response(id, -32602, "missing 'item_selector' or 'fields' param"),
                 }
             }
+            "extract_cards" => {
+                let selector = req.params.get("selector").and_then(|v| v.as_str());
+                let kind = req.params.get("kind").and_then(|v| v.as_str());
+                let limit = req
+                    .params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(50) as u32;
+                match session.extract_cards(selector, limit, kind) {
+                    Ok(v) => ok_response(id, v),
+                    Err(e) => err_response(id, -6, e.to_string()),
+                }
+            }
             "settle" => {
                 let max_ms = req
                     .params
@@ -3700,6 +4931,14 @@ async fn rpc_main(profile: Profile) -> Result<()> {
                 },
                 None => err_response(id, -32602, "missing 'ref' param"),
             },
+            "activate" => {
+                let ref_ = req.params.get("ref").and_then(|v| v.as_str());
+                let text = req.params.get("text").and_then(|v| v.as_str());
+                match session.activate(ref_, text).await {
+                    Ok(v) => ok_response(id, v),
+                    Err(e) => err_response(id, -7, e.to_string()),
+                }
+            }
             "type" => {
                 let r = req.params.get("ref").and_then(|v| v.as_str());
                 let t = req.params.get("text").and_then(|v| v.as_str());
@@ -3806,7 +5045,7 @@ async fn rpc_main(profile: Profile) -> Result<()> {
 //
 // Spec: https://modelcontextprotocol.io/  (JSON-RPC 2.0 over stdio)
 // Methods we handle: initialize, notifications/initialized, tools/list, tools/call.
-// Tool surface = our 12 RPC methods (everything except `close`, which is implicit).
+// Tool surface = our RPC methods (everything except `close`, which is implicit).
 // =============================================================================
 
 fn mcp_tools() -> Value {
@@ -3846,6 +5085,45 @@ fn mcp_tools() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "text_clean",
+            "description": "Return chrome-stripped, JSON-stripped, whitespace-collapsed text from a selector or the best content root. Drops script/style/noscript/svg and page chrome (nav/header/footer/aside) plus obvious hidden widgets and repeated boilerplate.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "Optional CSS selector to scope extraction. Default: best content root." },
+                    "max_chars": { "type": "integer", "description": "Optional max characters to return." }
+                }
+            }
+        },
+        {
+            "name": "find_text",
+            "description": "Find localized text matches and return [{ref, tag, attrs, before, match, after, text}]. Ranks article/main/content matches above nav/header/footer boilerplate.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "Substring to match (or exact string if exact=true)" },
+                    "selector": { "type": "string", "description": "Optional CSS selector to limit search scope" },
+                    "exact": { "type": "boolean", "description": "If true, exact cleaned-text match instead of substring (default false)" },
+                    "limit": { "type": "integer", "description": "Max matches to return (default 20)" },
+                    "context_chars": { "type": "integer", "description": "Characters before/after each match (default 80)" }
+                },
+                "required": ["text"]
+            }
+        },
+        {
+            "name": "text_around",
+            "description": "Return cleaned surrounding text around an element ref or the best ranked text match. Returns {ref, before, match, after, text}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ref": { "type": "string", "description": "Optional element ref like e:142" },
+                    "text": { "type": "string", "description": "Optional text to locate when ref is omitted" },
+                    "selector": { "type": "string", "description": "Optional CSS selector to scope context" },
+                    "context_chars": { "type": "integer", "description": "Characters before/after the target (default 400)" }
+                }
+            }
+        },
+        {
             "name": "query_text",
             "description": "Find elements by visible text content. Returns the smallest/deepest element whose textContent matches the needle, with chrome (header/nav/footer/aside) skipped. Anchor-promotion: a span/strong/etc. inside an <a> resolves to the anchor (so click() targets the actionable element). Right tool when CSS selectors are unstable (React-rendered pages with hashed class names) but the visible label is reliable — e.g. find a 'Sign in' button without knowing its class.",
             "inputSchema": {
@@ -3863,6 +5141,43 @@ fn mcp_tools() -> Value {
             "name": "blockmap",
             "description": "Recompute the BlockMap for the current page. Use after eval'd JS or click/type modifies the DOM. Same shape as the inline blockmap from navigate.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "page_model",
+            "description": "Render the current page into semantic, task-discoverable JSON objects. Reconstructs page structure as search_form, nav_link, article_card, course_card, model_card, product_card, table, answer_block, and limitation objects with actions, normalized fields, goal-based scoring, and provenance. Prefer this as the first planning tool after navigate when raw links/text are too wide.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "goal": { "type": "string", "description": "Optional task goal/query used to rank objects by relevance." },
+                    "types": { "type": "array", "items": { "type": "string" }, "description": "Optional object kinds to return, e.g. search_form, article_card, model_card, course_card, card, table, answer_block." },
+                    "limit": { "type": "integer", "description": "Max objects to return (default 50)." }
+                }
+            }
+        },
+        {
+            "name": "route_discover",
+            "description": "Find page-owned navigation/search routes for a goal. Returns ranked visible links, forms with controls/query_url previews, and inferred URLs derived from page-owned routes plus goal terms. Use before guessing URLs manually.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "goal": { "type": "string", "description": "Optional task goal/query used to rank routes and build GET query previews." },
+                    "limit": { "type": "integer", "description": "Max routes/forms/inferred URLs per section (default 30)." }
+                }
+            }
+        },
+        {
+            "name": "network_extract",
+            "description": "Parse captured JSON/API/network responses into semantic objects with fields, scores, matched query terms, and capture/path provenance. Use after navigate or activate when network_stores shows JSON/GraphQL/NDJSON captures and raw body_preview is too noisy.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Optional task query/goal used to rank objects." },
+                    "types": { "type": "array", "items": { "type": "string" }, "description": "Optional object kinds to keep, e.g. product_card, article_card, model_card, network_object, card." },
+                    "limit": { "type": "integer", "description": "Max objects to return (default 50)." },
+                    "host": { "type": "string", "description": "Optional substring filter on response host." },
+                    "nav_id": { "type": "string", "description": "Defaults to the most recent navigation_id. Pass 'all' to inspect all captures." }
+                }
+            }
         },
         {
             "name": "extract",
@@ -3899,6 +5214,18 @@ fn mcp_tools() -> Value {
             }
         },
         {
+            "name": "extract_cards",
+            "description": "Auto-detect repeated article/card/product/course/listing blocks and return normalized items [{title, url, snippet, meta, image_alt, score}]. Prefer this over extract_list when the page has semantically ambiguous recipe, course, product, or model cards and you do not already know field selectors. Optional selector scopes detection to known card nodes; kind can bias scoring (recipe, course, product, listing).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "Optional CSS selector matching each card/listing block" },
+                    "limit": { "type": "integer", "description": "Max items to extract (default 50)" },
+                    "kind": { "type": "string", "description": "Optional hint: recipe, course, product, listing, article" }
+                }
+            }
+        },
+        {
             "name": "settle",
             "description": "Drain the JS event loop: alternately runs queued microtasks (Promise resolutions) and fires expired setTimeout/setInterval callbacks, sleeping to the next deadline when only timers remain. Returns when the queue is empty OR max_ms elapses OR max_iters iterations complete. Defaults: max_ms=2000, max_iters=50. Use after seeding the DOM (or after eval'd code that schedules timers) to let pending callbacks run.",
             "inputSchema": {
@@ -3916,6 +5243,17 @@ fn mcp_tools() -> Value {
                 "type": "object",
                 "properties": { "ref": { "type": "string", "description": "Element ref like e:142" } },
                 "required": ["ref"]
+            }
+        },
+        {
+            "name": "activate",
+            "description": "Higher-level action probe. Clicks an element by ref or visible action text, settles, and returns before/after URL, BlockMap/page_model summaries, network counts, hashes, and classification: navigated, dom_changed, network_changed, no_effect, or unsupported.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ref": { "type": "string", "description": "Optional element ref like e:142." },
+                    "text": { "type": "string", "description": "Optional visible action text to locate when ref is omitted." }
+                }
             }
         },
         {
@@ -4031,6 +5369,38 @@ async fn dispatch_tool(session: &mut Session, name: &str, args: &Value) -> Resul
             session.text(sel)
         }
         "text_main" => session.text_main(),
+        "text_clean" => {
+            let selector = str_arg("selector");
+            let max_chars = args
+                .get("max_chars")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            session.text_clean(selector, max_chars)
+        }
+        "find_text" => {
+            let text = str_arg("text").ok_or_else(|| anyhow!("missing 'text'"))?;
+            let selector = str_arg("selector");
+            let exact = args.get("exact").and_then(|v| v.as_bool()).unwrap_or(false);
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
+            let context_chars = args
+                .get("context_chars")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(80) as u32;
+            session.find_text(text, selector, exact, limit, context_chars)
+        }
+        "text_around" => {
+            let ref_ = str_arg("ref");
+            let text = str_arg("text");
+            if ref_.is_none() && text.is_none() {
+                return Err(anyhow!("missing 'ref' or 'text'"));
+            }
+            let selector = str_arg("selector");
+            let context_chars = args
+                .get("context_chars")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(400) as u32;
+            session.text_around(ref_, text, selector, context_chars)
+        }
         "query_text" => {
             let text = str_arg("text").ok_or_else(|| anyhow!("missing 'text'"))?;
             let selector = str_arg("selector");
@@ -4039,6 +5409,25 @@ async fn dispatch_tool(session: &mut Session, name: &str, args: &Value) -> Resul
             session.query_text(text, selector, exact, limit)
         }
         "blockmap" => session.blockmap(),
+        "page_model" => {
+            let goal = str_arg("goal");
+            let types = args.get("types");
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as u32;
+            session.page_model(goal, types, limit)
+        }
+        "route_discover" => {
+            let goal = str_arg("goal");
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(30) as u32;
+            session.route_discover(goal, limit)
+        }
+        "network_extract" => {
+            let query = str_arg("query").or_else(|| str_arg("goal"));
+            let types = args.get("types");
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+            let host = str_arg("host");
+            let nav_id = str_arg("nav_id");
+            session.network_extract(query, types, limit, host, nav_id)
+        }
         "extract" => {
             let strategy = str_arg("strategy");
             session.extract(strategy)
@@ -4056,6 +5445,12 @@ async fn dispatch_tool(session: &mut Session, name: &str, args: &Value) -> Resul
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(1000) as u32;
             session.extract_list(item, fields, limit)
         }
+        "extract_cards" => {
+            let selector = str_arg("selector");
+            let kind = str_arg("kind");
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as u32;
+            session.extract_cards(selector, limit, kind)
+        }
         "settle" => {
             let max_ms = args.get("max_ms").and_then(|v| v.as_u64()).unwrap_or(2000);
             let max_iters = args.get("max_iters").and_then(|v| v.as_u64()).unwrap_or(50) as u32;
@@ -4064,6 +5459,11 @@ async fn dispatch_tool(session: &mut Session, name: &str, args: &Value) -> Resul
         "click" => {
             let r = str_arg("ref").ok_or_else(|| anyhow!("missing 'ref'"))?;
             session.click(r).await
+        }
+        "activate" => {
+            let ref_ = str_arg("ref");
+            let text = str_arg("text");
+            session.activate(ref_, text).await
         }
         "type" => {
             let r = str_arg("ref").ok_or_else(|| anyhow!("missing 'ref'"))?;
@@ -4742,6 +6142,59 @@ mod outcome_tests {
             .and_then(|v| v.as_array())
             .expect("tool_recommendations array");
         assert_eq!(recs[0].as_str(), Some("chrome_escalation"));
+    }
+}
+
+#[cfg(test)]
+mod network_extract_tests {
+    use super::{extract_network_objects_from_capture, network_store, network_terms};
+
+    fn capture(body: &str) -> network_store::NetworkCapture {
+        network_store::NetworkCapture {
+            capture_id: 7,
+            url: "https://api.example.com/v1/items".to_string(),
+            method: "GET".to_string(),
+            status: 200,
+            content_type: "application/json".to_string(),
+            body_bytes: body.len(),
+            body_truncated: false,
+            body_preview: body.to_string(),
+            captured_at_ms: 0,
+            score: 55,
+            kind: network_store::ContentKind::Json,
+            navigation_id: Some("nav_1".to_string()),
+        }
+    }
+
+    #[test]
+    fn extracts_named_array_items() {
+        let cap = capture(
+            r#"{
+                "items": [
+                    {"id": 1, "name": "Alpha Jacket", "price": "$19", "url": "/p/alpha"},
+                    {"id": 2, "name": "Beta Jacket", "price": "$29", "url": "/p/beta"}
+                ]
+            }"#,
+        );
+        let terms = network_terms("alpha jacket");
+        let objects = extract_network_objects_from_capture(&cap, &terms, 20).unwrap();
+        let alpha = objects
+            .iter()
+            .find(|o| o.title.as_deref() == Some("Alpha Jacket"))
+            .expect("alpha object");
+        assert_eq!(alpha.kind, "product_card");
+        assert_eq!(
+            alpha.url.as_deref(),
+            Some("https://api.example.com/p/alpha")
+        );
+        assert!(alpha.matched_terms.contains(&"alpha".to_string()));
+    }
+
+    #[test]
+    fn redacts_sensitive_fields() {
+        let cap = capture(r#"{"name":"Viewer","token":"secret-token","id":"u1"}"#);
+        let objects = extract_network_objects_from_capture(&cap, &[], 10).unwrap();
+        assert_eq!(objects[0].fields.get("token").unwrap(), "[REDACTED]");
     }
 }
 

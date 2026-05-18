@@ -165,6 +165,35 @@ python3 train/eval_subagent_tasks.py \
 Each results file should contain one JSON object per task with `task_id`, `success`, `answer`, `steps`, and `elapsed_ms`.
 The corpus lives in `train/corpus/subagent_tasks.json`.
 
+## WebVoyager JSONL eval
+
+Local scorer for completed WebVoyager-style task runs. The scorer does not run
+subagents; it validates a JSONL corpus against a JSONL result file and prints
+answer success, handled success, handling counts, per-site metrics, and friction
+totals.
+
+```bash
+# All-site coverage run
+python3 train/webvoyager_eval.py score \
+  --corpus docs/webvoyager-site-coverage-v1.jsonl \
+  --results docs/webvoyager-site-coverage-run-v1-2026-05-17.jsonl
+
+# Fast-regression baseline
+python3 train/webvoyager_eval.py score \
+  --corpus docs/webvoyager-baseline-v1-2026-05-16.jsonl \
+  --results docs/webvoyager-baseline-v1-2026-05-16.jsonl
+```
+
+Corpus JSONL rows must include `task_id`, `web_name`, `start_url`, and
+`question`; `expected_handling` is accepted when present. Result JSONL rows must
+include stable keys: `task_id`, `run_timestamp`, `web_name`, `start_url`,
+`question`, `success`, `handled_success`, `handling`, `confidence`,
+`unbrowser_signals`, and `friction`. Extra fields are allowed.
+
+Validation fails on missing corpus tasks, duplicate task IDs, missing stable
+result keys, or unknown `handling` values. Result task IDs outside the corpus are
+reported as warnings and ignored by the aggregate denominator.
+
 ## Tests
 
 ```bash
@@ -173,6 +202,9 @@ python3 -m unittest train.test_collect -v
 
 # Skip in CI when network's locked down
 NO_NETWORK_TESTS=1 python3 -m unittest train.test_collect -v
+
+# Run WebVoyager scorer unit tests (offline)
+python3 -m unittest train.test_webvoyager_eval -v
 ```
 
 ## Politeness & ethics
