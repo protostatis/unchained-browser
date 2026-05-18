@@ -77,7 +77,7 @@ Allowed `handling` values:
 |---|---|---|
 | `statuses` | array of integers | HTTP statuses observed on primary navigations. |
 | `challenge_provider` | string or null | Canonical provider label such as `aws_waf`, `cloudflare_turnstile`, `datadome`, or `unknown_block`. Do not mix retry state into this field. |
-| `challenge` | object or null | Full challenge detector result. |
+| `challenge` | object or null | Full challenge detector result. `clearance_cookie` must be a cookie-name hint or null, never a live cookie value. |
 | `rate_limit` | object or null | Retry-later metadata. |
 | `browser_route` | object or null | Strict-mode browser-routing decision. |
 | `likely_js_filled` | boolean | BlockMap density indicated an SSR shell or JS-filled surface. |
@@ -103,6 +103,10 @@ Challenge envelope:
   "hint": "Needs browser clearance cookie."
 }
 ```
+
+Checked-in artifacts must not store live clearance cookie values. If a run sees a
+cookie value, replace it with the cookie name, a redacted marker, or null before
+committing the JSONL.
 
 Rate-limit envelope:
 
@@ -142,6 +146,13 @@ Browser-route envelope:
 | `rate_limited` | Site returned `429` or equivalent. |
 | `challenge_routed` | Challenge was surfaced without unsafe retries. |
 | `browser_routed` | Task required rendered browser behavior in strict mode. |
+
+`manual_url_guess` should be true when the agent constructs or uses a URL that
+was not supported by a visible link, form action, script-discovered route,
+network response, or `route_discover` provenance. It should remain false for
+absolute or relative URLs copied from page-owned links/forms, URLs returned by
+captured first-party APIs, query URLs generated from a discovered form action,
+or routes with explicit `route_provenance` evidence.
 
 ## Artifact Changelog
 
