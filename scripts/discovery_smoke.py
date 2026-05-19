@@ -248,6 +248,19 @@ def main() -> int:
             route_urls = {r.get("url") for r in routes.get("routes", [])}
             ok &= check("route_discover includes JS-created route", base + "docs/api" in route_urls)
             ok &= check("route_discover includes timer-created route", base + "reports/monthly" in route_urls)
+
+            discovery = ub.call(
+                "discover",
+                url=base,
+                goal="find docs api changelog status reports",
+                exec_scripts=True,
+                same_origin=True,
+                limit=20,
+            )
+            discovery_urls = {r.get("url") for r in discovery.get("routes", [])}
+            ok &= check("discover merges JS-created routes", base + "docs/api" in discovery_urls)
+            ok &= check("discover merges timer-created routes", base + "reports/monthly" in discovery_urls)
+            ok &= check("discover reports network source", discovery.get("summary", {}).get("network_sources", 0) >= 1)
         finally:
             ub.close()
     finally:

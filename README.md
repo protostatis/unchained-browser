@@ -225,6 +225,7 @@ unbrowser 2> >(python3 scripts/watch.py)
 | `query {selector}` | CSS query → `[{ref, tag, attrs, text}]` |
 | `text {selector?}` | textContent of FIRST match (default `body`). On Wikipedia/MDN/news sites the first `<p>` is often a hatnote — prefer `text_main` for article body. |
 | `text_main` | textContent of `<main>` / `[role=main]` / single `<article>` / longest non-chrome subtree. Use this for reading article/docs/blog content. |
+| `discover {url?, goal?, exec_scripts?, same_origin?, include_network?, limit?}` | Cheap-first information discovery. Merges DOM routes, inferred form/query URLs, and network JSON routes into one ranked graph with provenance and escalation hints. Defaults to static discovery; set `exec_scripts: true` when fetch-visible routes are insufficient. |
 | `click {ref}` | dispatch click; auto-follows `<a href>` (returns `{status, url, bytes, headers, blockmap, challenge}` — same shape as `navigate`) |
 | `type {ref, text}` | set value + dispatch input/change events |
 | `submit {ref}` | gather GET-form fields + navigate |

@@ -131,7 +131,7 @@ Target capability:
     "goal": "find pricing docs api changelog status",
     "depth": 1,
     "same_origin": true,
-    "exec_scripts": true,
+    "exec_scripts": false,
     "action_budget": 3,
     "time_budget_ms": 10000,
     "route_limit": 100,
@@ -415,7 +415,8 @@ Acceptance criteria:
 
 1. Demo call returns all expected static, JS, delayed, and network routes.
 2. The output includes source/provenance for every candidate.
-3. `discover` can run with `exec_scripts=false` for an ultra-cheap static mode.
+3. `discover` defaults to ultra-cheap static mode and can opt into
+   `exec_scripts=true` when fetch-visible routes are insufficient.
 4. `discover` emits route-level escalation objects for known browser-only pages.
 
 ### Phase 8: Measure on real discovery tasks

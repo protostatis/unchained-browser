@@ -327,6 +327,7 @@ pub fn detect_browser_route(status: u16, body: &str, blockmap: &Value) -> Option
         .and_then(|v| v.as_array())
         .map(|a| a.len())
         .unwrap_or(0);
+    let raw_route_surface = contains_any(&lower, &["<a ", "<form", "href="]);
 
     let mut evidence: Vec<&'static str> = Vec::new();
     let (reason, confidence) = if contains_any(
@@ -378,6 +379,9 @@ pub fn detect_browser_route(status: u16, body: &str, blockmap: &Value) -> Option
         ("no_interactives", 0.72)
     } else if contains_any(&lower, &["search", "sign in", "checkout", "continue"])
         && interactive_count == 0
+        && structure_count <= 1
+        && body.len() < 20_000
+        && !raw_route_surface
     {
         evidence.push("primary_action_text_without_interactives");
         ("missing_primary_action", 0.70)
@@ -657,6 +661,25 @@ mod tests {
         assert_eq!(
             route.get("reason").and_then(|v| v.as_str()),
             Some("thin_shell")
+        );
+    }
+
+    #[test]
+    fn browser_route_does_not_flag_static_route_surface() {
+        let blockmap = json!({
+            "title": "Usable News",
+            "structure": [{"role": "main"}],
+            "interactives": {"links": 0, "buttons": 0, "inputs": [], "forms": []},
+            "density": {"thin_shell": false, "likely_js_filled": false}
+        });
+        let route = detect_browser_route(
+            200,
+            r#"<html><body><p>Search our archive or continue reading.</p><a href="/news/climate">Climate guide</a></body></html>"#,
+            &blockmap,
+        );
+        assert!(
+            route.is_none(),
+            "static links should remain cheap-path discoverable"
         );
     }
 
