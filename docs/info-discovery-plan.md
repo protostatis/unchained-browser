@@ -129,17 +129,20 @@ Target capability:
   "params": {
     "url": "https://example.com",
     "goal": "find pricing docs api changelog status",
-    "depth": 1,
     "same_origin": true,
     "exec_scripts": false,
-    "action_budget": 3,
-    "time_budget_ms": 10000,
-    "route_limit": 100,
-    "include_api_endpoints": true,
-    "include_network_sources": true
+    "include_network": true,
+    "limit": 100,
+    "debug": false
   }
 }
 ```
+
+`discover` defaults to the cheap static path. `exec_scripts: true` is an opt-in
+second pass when static HTML does not expose enough routes; the result labels
+pre-script links as `static_dom` and JS-created links as `js_dom`. `debug: false`
+keeps payloads compact by returning summaries for the nested tools. `debug: true`
+adds full `navigate`, `route_discover`, and `network_extract` payloads.
 
 ### Proposed output shape
 
@@ -148,13 +151,14 @@ Target capability:
   "url": "https://example.com/",
   "title": "Example",
   "status": 200,
+  "navigation_id": "nav_1",
   "goal": "find pricing docs api changelog status",
+  "debug": false,
   "summary": {
     "routes": 42,
     "forms": 2,
     "api_endpoints": 9,
     "network_sources": 4,
-    "actions_probed": 3,
     "escalations": 1
   },
   "routes": [
@@ -201,15 +205,9 @@ Target capability:
       "body_truncated": false
     }
   ],
-  "actions": [
-    {
-      "label": "More",
-      "ref": "e:91",
-      "effect": "dom_changed",
-      "new_routes": 6,
-      "provenance": []
-    }
-  ],
+  "navigate_summary": {"status": 200, "tool_recommendations": ["route_discover", "query_text"]},
+  "route_discover_summary": {"routes": 18, "forms": 2, "inferred_urls": 8},
+  "network_extract_summary": {"capture_count": 4, "object_count": 12, "errors": 0},
   "escalations": [
     {
       "url": "https://example.com/map",
@@ -218,7 +216,8 @@ Target capability:
       "recommended_tool": "chrome",
       "evidence": ["map canvas present", "no DOM result cards"]
     }
-  ]
+  ],
+  "errors": []
 }
 ```
 
@@ -236,6 +235,7 @@ supporting provenance.
 | `script_literal` | URL/path string found in script contents. | `/api/v1/search`, `/docs/:slug`. |
 | `js_global` | Route/API found in known globals. | `__NEXT_DATA__`, `__NUXT__`, route manifests. |
 | `network_json` | Route/API found in captured JSON/GraphQL/NDJSON response. | API search results, CMS payloads. |
+| `network_api` | API-like URL found directly in captured network JSON. | `/api/search`, GraphQL endpoint field. |
 | `activation` | Route appeared after safe click/action probe. | Menus, tabs, load-more. |
 | `sitemap` | Route found from sitemap/robots side channel. | `/sitemap.xml`, `robots.txt`. |
 | `manual_hint` | Explicitly supplied by caller, not discovered. | Seed URLs, allowlisted templates. |

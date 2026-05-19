@@ -62,6 +62,7 @@ These rules are conservative on purpose. The skill's purpose is browsing, not au
 - Docs sites, GitHub/GitLab UI, PyPI/npm registry pages, MDN, Stack Overflow.
 - Hacker News, Reddit (old.reddit / .json endpoints), Wikipedia, news articles.
 - Search-result extraction (Google/DDG SERPs, GitHub search, package indexes).
+- Information discovery tasks where you need to find useful routes, forms, API-like endpoints, or escalation targets before extracting content — call `discover` first.
 - Any flow where you previously reached for `curl` but the response was empty because the site is an SPA shell — `unbrowser` runs the scripts and seeds the DOM.
 - Multi-step flows on simple HTML forms (HN search, Wikipedia search) — `navigate` → `type` into a `ref` → `submit` works.
 
@@ -150,6 +151,7 @@ with Client() as ub:
 These are the methods the agent will use on every task:
 
 - `navigate {url}` — GET request that matches a real Chrome client's TLS handshake (JA3/JA4) and HTTP/2 frame ordering, so sites that reject non-browser HTTP libraries accept the request. Parses the response, returns blockmap + challenge detection.
+- `discover {url?, goal?, exec_scripts?, same_origin?, include_network?, limit?, debug?}` — cheap-first route/form/API discovery. Use this before extraction when the task is to find where information lives. Default output is compact summaries plus merged `routes`, `forms`, `api_endpoints`, `network_sources`, and `escalations`; pass `debug: true` only when you need full nested tool payloads.
 - `query {selector}` — querySelectorAll. Supports tag/id/class/attribute (`=` `^=` `$=` `*=` `~=`), all four combinators, and `:first-child` / `:last-child` / `:first-of-type` / `:last-of-type` / `:nth-child(N|odd|even)` / `:nth-of-type(N|odd|even)` / `:only-child` / `:only-of-type`. **Not yet:** `:not()`, `:has()`, `An+B`.
 - `text {selector?}` — textContent of first match (default `body`).
 - `body` — raw HTML of the last navigation.
@@ -164,6 +166,7 @@ These are the methods the agent will use on every task:
 `navigate` also returns `tool_likelihoods` and `tool_recommendations`. Use them as a ranking, not a mandate:
 
 - Start with the highest-ranked suggestion that still matches the task.
+- Prefer `discover` when the task is exploratory: find pricing/docs/search/status/API routes, identify forms, or decide whether Chrome is needed before doing extraction.
 - Prefer `query_text` / `query` when the page has stable visible labels or selector hints.
 - Prefer `text_main` when the task is reading article/docs content.
 - Prefer `extract`, `extract_list`, or `extract_table` when the page exposes structured data.

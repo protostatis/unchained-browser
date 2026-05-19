@@ -258,9 +258,20 @@ def main() -> int:
                 limit=20,
             )
             discovery_urls = {r.get("url") for r in discovery.get("routes", [])}
+            sources_by_url = {r.get("url"): set(r.get("sources") or []) for r in discovery.get("routes", [])}
+            api_urls = {e.get("url") for e in discovery.get("api_endpoints", [])}
             ok &= check("discover merges JS-created routes", base + "docs/api" in discovery_urls)
             ok &= check("discover merges timer-created routes", base + "reports/monthly" in discovery_urls)
+            ok &= check("discover labels static route source", "static_dom" in sources_by_url.get(base + "pricing", set()))
+            ok &= check("discover labels JS route source", "js_dom" in sources_by_url.get(base + "docs/api", set()))
+            ok &= check("discover extracts JSON API endpoints", base + "api/private/search" in api_urls)
+            ok &= check("discover default output is compact", "navigate" not in discovery and "route_discover" not in discovery)
+            ok &= check("discover includes navigate summary", bool(discovery.get("navigate_summary")))
             ok &= check("discover reports network source", discovery.get("summary", {}).get("network_sources", 0) >= 1)
+
+            debug_discovery = ub.call("discover", url=base, goal="find pricing", debug=True, limit=5)
+            ok &= check("discover debug includes nested navigate", "navigate" in debug_discovery)
+            ok &= check("discover debug includes nested route_discover", "route_discover" in debug_discovery)
         finally:
             ub.close()
     finally:

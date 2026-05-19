@@ -133,7 +133,7 @@ def check(label: str, condition: bool) -> bool:
 
 
 def top_tools(discovery) -> list[str]:
-    nav = discovery.get("navigate") or {}
+    nav = discovery.get("navigate_summary") or discovery.get("navigate") or {}
     return nav.get("tool_recommendations") or []
 
 
@@ -175,7 +175,7 @@ def main() -> int:
         ok &= check("enable-JS shell top-ranks Chrome", top_tools(shell)[0] == "chrome_escalation")
 
         waf = ub.call("discover", url=base + "/aws", goal="search controller", limit=20)
-        challenge = (waf.get("navigate") or {}).get("challenge") or {}
+        challenge = (waf.get("navigate_summary") or waf.get("navigate") or {}).get("challenge") or {}
         ok &= check("AWS WAF page challenge-routes", challenge.get("provider") == "aws_waf")
         ok &= check("AWS WAF top-ranks Chrome", top_tools(waf)[0] == "chrome_escalation")
     finally:

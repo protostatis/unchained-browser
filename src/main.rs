@@ -400,6 +400,16 @@ struct Session {
     prefit: Option<prefit::PrefitBundle>,
 }
 
+struct DiscoverOptions<'a> {
+    url: Option<&'a str>,
+    goal: Option<&'a str>,
+    exec_scripts: bool,
+    limit: u32,
+    same_origin: bool,
+    include_network: bool,
+    debug: bool,
+}
+
 impl Session {
     fn new(profile: &Profile, policy_block: bool) -> Result<Self> {
         let js_rt = rquickjs::Runtime::new().context("rquickjs Runtime::new")?;
@@ -1940,19 +1950,30 @@ impl Session {
         ))
     }
 
-    async fn discover(
-        &mut self,
-        url: Option<&str>,
-        goal: Option<&str>,
-        exec_scripts: bool,
-        limit: u32,
-        same_origin: bool,
-        include_network: bool,
-    ) -> Result<Value> {
+    async fn discover(&mut self, opts: DiscoverOptions<'_>) -> Result<Value> {
+        let DiscoverOptions {
+            url,
+            goal,
+            exec_scripts,
+            limit,
+            same_origin,
+            include_network,
+            debug,
+        } = opts;
         let limit = limit.clamp(1, 200);
-        let nav = match url {
-            Some(u) => Some(self.navigate(u, exec_scripts).await?),
-            None => None,
+        let mut static_route_keys = HashSet::new();
+        let nav = if let Some(u) = url {
+            if exec_scripts {
+                self.navigate(u, false).await?;
+                if let Ok(static_model) = self.route_discover(goal, limit) {
+                    static_route_keys = discovery_route_keys_from_model(&static_model);
+                }
+                Some(self.navigate(u, true).await?)
+            } else {
+                Some(self.navigate(u, false).await?)
+            }
+        } else {
+            None
         };
         let current_url = nav
             .as_ref()
@@ -2002,15 +2023,22 @@ impl Session {
         };
         let mut routes = Vec::new();
         let mut route_index: HashMap<String, usize> = HashMap::new();
-        let dom_source = if exec_scripts { "js_dom" } else { "static_dom" };
+        let fallback_dom_source = if exec_scripts { "js_dom" } else { "static_dom" };
 
         if let Some(items) = route_model.get("routes").and_then(|v| v.as_array()) {
             for item in items {
+                let source = item
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .map(discovery_route_key)
+                    .filter(|key| static_route_keys.contains(key))
+                    .map(|_| "static_dom")
+                    .unwrap_or(fallback_dom_source);
                 upsert_discovery_route(
                     &mut routes,
                     &mut route_index,
                     item,
-                    dom_source,
+                    source,
                     "document_route",
                     0.72,
                     &current_url,
@@ -2091,6 +2119,32 @@ impl Session {
                         }]
                     }));
                 }
+                for item in raw_network_route_candidates(&capture, limit as usize) {
+                    let source = item
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .filter(|k| *k == "api_endpoint")
+                        .map(|_| "network_api")
+                        .unwrap_or("network_json");
+                    if source == "network_api" {
+                        api_endpoints.push(json!({
+                            "url": item.get("url").cloned().unwrap_or(Value::Null),
+                            "method": capture.method,
+                            "source": "network_json",
+                            "confidence": item.get("confidence").cloned().unwrap_or(json!(0.56)),
+                            "provenance": item.get("provenance").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+                        }));
+                    }
+                    upsert_discovery_route(
+                        &mut routes,
+                        &mut route_index,
+                        &item,
+                        source,
+                        "network_route",
+                        0.54,
+                        &current_url,
+                    );
+                }
                 network_sources.push(json!({
                     "capture_id": capture.capture_id,
                     "url": capture.url,
@@ -2128,12 +2182,29 @@ impl Session {
             forms.as_array().map(|a| a.len()).unwrap_or(0),
         );
 
-        Ok(json!({
+        let navigate_summary = summarize_discover_navigate(nav.as_ref());
+        let route_discover_summary = route_model
+            .get("summary")
+            .cloned()
+            .unwrap_or_else(|| json!({"routes": 0, "forms": 0, "inferred_urls": 0}));
+        let network_extract_summary = if network_extract_result.is_null() {
+            Value::Null
+        } else {
+            json!({
+                "nav_id": network_extract_result.get("nav_id").cloned().unwrap_or(Value::Null),
+                "capture_count": network_extract_result.get("capture_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                "object_count": network_extract_result.get("object_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                "errors": network_extract_result.get("errors").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+            })
+        };
+
+        let mut result = json!({
             "url": current_url,
             "title": title,
             "status": status,
             "navigation_id": navigation_id,
             "goal": goal,
+            "debug": debug,
             "summary": {
                 "routes": routes.len(),
                 "forms": forms.as_array().map(|a| a.len()).unwrap_or(0),
@@ -2145,12 +2216,18 @@ impl Session {
             "forms": forms,
             "api_endpoints": api_endpoints,
             "network_sources": network_sources,
-            "network_extract": network_extract_result,
-            "route_discover": route_model,
+            "navigate_summary": navigate_summary,
+            "route_discover_summary": route_discover_summary,
+            "network_extract_summary": network_extract_summary,
             "escalations": escalations,
             "errors": discovery_errors,
-            "navigate": nav,
-        }))
+        });
+        if debug && let Some(map) = result.as_object_mut() {
+            map.insert("navigate".to_string(), nav.unwrap_or(Value::Null));
+            map.insert("route_discover".to_string(), route_model);
+            map.insert("network_extract".to_string(), network_extract_result);
+        }
+        Ok(result)
     }
 
     fn attach_page_model_network_objects(
@@ -2959,9 +3036,47 @@ impl Session {
 fn discovery_route_key(raw_url: &str) -> String {
     if let Ok(mut url) = url::Url::parse(raw_url) {
         url.set_fragment(None);
+        let mut pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(k, _)| !is_tracking_query_param(k))
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        if pairs.is_empty() {
+            url.set_query(None);
+        } else {
+            pairs.sort();
+            url.query_pairs_mut().clear().extend_pairs(pairs);
+        }
+        if url.path() != "/" && url.path().ends_with('/') {
+            let trimmed = url.path().trim_end_matches('/').to_string();
+            url.set_path(&trimmed);
+        }
         return url.to_string();
     }
     raw_url.trim().to_string()
+}
+
+fn is_tracking_query_param(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.starts_with("utm_")
+        || matches!(
+            key.as_str(),
+            "fbclid" | "gclid" | "msclkid" | "mc_cid" | "mc_eid" | "igshid" | "ref" | "ref_src"
+        )
+}
+
+fn discovery_route_keys_from_model(model: &Value) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for section in ["routes", "inferred_urls"] {
+        if let Some(items) = model.get(section).and_then(|v| v.as_array()) {
+            for item in items {
+                if let Some(url) = item.get("url").and_then(|v| v.as_str()) {
+                    out.insert(discovery_route_key(url));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn discovery_page_owned(base: &str, raw_url: &str) -> bool {
@@ -2990,6 +3105,205 @@ fn is_api_like_url(raw_url: &str) -> bool {
         || lower.contains(".json")
         || lower.contains("/_next/data/")
         || lower.contains("/__data.json")
+}
+
+fn summarize_discover_navigate(nav: Option<&Value>) -> Value {
+    let Some(nav) = nav else {
+        return Value::Null;
+    };
+    let density = nav
+        .get("blockmap")
+        .and_then(|v| v.get("density"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    json!({
+        "navigation_id": nav.get("navigation_id").cloned().unwrap_or(Value::Null),
+        "status": nav.get("status").cloned().unwrap_or(Value::Null),
+        "url": nav.get("url").cloned().unwrap_or(Value::Null),
+        "challenge": nav.get("challenge").cloned().unwrap_or(Value::Null),
+        "rate_limit": nav.get("rate_limit").cloned().unwrap_or(Value::Null),
+        "browser_route": nav.get("browser_route").cloned().unwrap_or(Value::Null),
+        "tool_recommendations": nav.get("tool_recommendations").cloned().unwrap_or(Value::Null),
+        "tool_confidence": nav.get("tool_confidence").cloned().unwrap_or(Value::Null),
+        "tool_margin": nav.get("tool_margin").cloned().unwrap_or(Value::Null),
+        "density": density,
+        "network_stores": nav.get("network_stores").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn raw_network_route_candidates(
+    capture: &network_store::NetworkCapture,
+    limit: usize,
+) -> Vec<Value> {
+    if capture.body_truncated || limit == 0 {
+        return Vec::new();
+    }
+    let mut roots = Vec::new();
+    if matches!(capture.kind, network_store::ContentKind::Ndjson) {
+        for (idx, line) in capture.body_preview.lines().enumerate().take(100) {
+            if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
+                roots.push((value, format!("$[{idx}]")));
+            }
+        }
+    } else if let Ok(value) = serde_json::from_str::<Value>(&capture.body_preview) {
+        roots.push((value, "$".to_string()));
+    }
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut visited = 0usize;
+    for (value, path) in roots {
+        collect_raw_network_routes(
+            &value,
+            &path,
+            capture,
+            limit,
+            &mut visited,
+            &mut seen,
+            &mut out,
+        );
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
+}
+
+fn collect_raw_network_routes(
+    value: &Value,
+    path: &str,
+    capture: &network_store::NetworkCapture,
+    limit: usize,
+    visited: &mut usize,
+    seen: &mut HashSet<String>,
+    out: &mut Vec<Value>,
+) {
+    if *visited >= limit.saturating_mul(120).max(400) || out.len() >= limit {
+        return;
+    }
+    *visited += 1;
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let child_path = json_path_child(path, key);
+                if let Some(raw) = child.as_str()
+                    && is_route_like_json_key(key)
+                    && let Some(url) = resolve_json_url(raw, &capture.url)
+                {
+                    push_raw_network_route_candidate(
+                        &url,
+                        raw,
+                        key,
+                        &child_path,
+                        capture,
+                        seen,
+                        out,
+                    );
+                    if out.len() >= limit {
+                        return;
+                    }
+                }
+                if let Value::Array(arr) = child
+                    && is_route_like_json_key(key)
+                {
+                    for (idx, entry) in arr.iter().take(100).enumerate() {
+                        if let Some(raw) = entry.as_str()
+                            && let Some(url) = resolve_json_url(raw, &capture.url)
+                        {
+                            let entry_path = format!("{child_path}[{idx}]");
+                            push_raw_network_route_candidate(
+                                &url,
+                                raw,
+                                key,
+                                &entry_path,
+                                capture,
+                                seen,
+                                out,
+                            );
+                            if out.len() >= limit {
+                                return;
+                            }
+                        }
+                    }
+                }
+                if matches!(child, Value::Object(_) | Value::Array(_)) {
+                    collect_raw_network_routes(
+                        child,
+                        &child_path,
+                        capture,
+                        limit,
+                        visited,
+                        seen,
+                        out,
+                    );
+                    if out.len() >= limit {
+                        return;
+                    }
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for (idx, child) in arr.iter().take(250).enumerate() {
+                let child_path = format!("{path}[{idx}]");
+                collect_raw_network_routes(child, &child_path, capture, limit, visited, seen, out);
+                if out.len() >= limit {
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_raw_network_route_candidate(
+    url: &str,
+    label: &str,
+    key: &str,
+    path: &str,
+    capture: &network_store::NetworkCapture,
+    seen: &mut HashSet<String>,
+    out: &mut Vec<Value>,
+) {
+    let route_key = discovery_route_key(url);
+    if !seen.insert(route_key) {
+        return;
+    }
+    let normalized = normalized_key(key);
+    let kind = if is_api_like_url(url)
+        || normalized.contains("endpoint")
+        || normalized == "api"
+        || normalized.ends_with("api")
+    {
+        "api_endpoint"
+    } else {
+        "network_route"
+    };
+    out.push(json!({
+        "url": url,
+        "label": label,
+        "kind": kind,
+        "score": if kind == "api_endpoint" { 0.48 } else { 0.52 },
+        "confidence": if kind == "api_endpoint" { 0.56 } else { 0.58 },
+        "matched_terms": [],
+        "provenance": [{
+            "source": "network",
+            "capture_id": capture.capture_id,
+            "url": capture.url,
+            "path": path,
+            "reason": "route-like JSON string field"
+        }]
+    }));
+}
+
+fn is_route_like_json_key(key: &str) -> bool {
+    let key = normalized_key(key);
+    matches!(
+        key.as_str(),
+        "url" | "href" | "link" | "path" | "route" | "permalink" | "endpoint" | "api" | "weburl"
+    ) || key.ends_with("url")
+        || key.ends_with("href")
+        || key.ends_with("path")
+        || key.contains("endpoint")
 }
 
 fn push_source(route: &mut Value, source: &str) {
@@ -5269,8 +5583,21 @@ async fn rpc_main(profile: Profile) -> Result<()> {
                     .get("include_network")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
+                let debug = req
+                    .params
+                    .get("debug")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 match session
-                    .discover(url, goal, exec, limit, same_origin, include_network)
+                    .discover(DiscoverOptions {
+                        url,
+                        goal,
+                        exec_scripts: exec,
+                        limit,
+                        same_origin,
+                        include_network,
+                        debug,
+                    })
                     .await
                 {
                     Ok(v) => ok_response(id, v),
@@ -5607,7 +5934,8 @@ fn mcp_tools() -> Value {
                     "exec_scripts": { "type": "boolean", "description": "Run page scripts during navigation when url is provided. Default false; enable when static discovery is insufficient." },
                     "same_origin": { "type": "boolean", "description": "If true, only return page-owned routes." },
                     "include_network": { "type": "boolean", "description": "Include captured network JSON objects and API-like captures. Default true." },
-                    "limit": { "type": "integer", "description": "Max routes to return after dedupe/ranking (default 50)." }
+                    "limit": { "type": "integer", "description": "Max routes to return after dedupe/ranking (default 50)." },
+                    "debug": { "type": "boolean", "description": "If true, include full nested navigate, route_discover, and network_extract payloads. Default false returns compact summaries." }
                 }
             }
         },
@@ -5882,8 +6210,17 @@ async fn dispatch_tool(session: &mut Session, name: &str, args: &Value) -> Resul
                 .get("include_network")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
+            let debug = args.get("debug").and_then(|v| v.as_bool()).unwrap_or(false);
             session
-                .discover(url, goal, exec, limit, same_origin, include_network)
+                .discover(DiscoverOptions {
+                    url,
+                    goal,
+                    exec_scripts: exec,
+                    limit,
+                    same_origin,
+                    include_network,
+                    debug,
+                })
                 .await
         }
         "network_extract" => {
