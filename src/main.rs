@@ -410,6 +410,17 @@ struct DiscoverOptions<'a> {
     debug: bool,
 }
 
+const DISCOVERY_DOM_CONFIDENCE: f64 = 0.72;
+const DISCOVERY_INFERRED_CONFIDENCE: f64 = 0.68;
+const DISCOVERY_NETWORK_OBJECT_CONFIDENCE: f64 = 0.58;
+const DISCOVERY_CAPTURE_API_CONFIDENCE: f64 = 0.62;
+const DISCOVERY_NETWORK_ROUTE_CONFIDENCE: f64 = 0.54;
+const DISCOVERY_RAW_NETWORK_API_SCORE: f64 = 0.48;
+const DISCOVERY_RAW_NETWORK_ROUTE_SCORE: f64 = 0.52;
+const DISCOVERY_RAW_NETWORK_API_CONFIDENCE: f64 = 0.56;
+const DISCOVERY_RAW_NETWORK_ROUTE_CONFIDENCE: f64 = 0.58;
+const RAW_NETWORK_ROUTE_MAX_DEPTH: usize = 32;
+
 fn parse_discover_options(params: &Value) -> Result<DiscoverOptions<'_>> {
     let url = match params.get("url") {
         Some(Value::String(s)) => Some(s.as_str()),
@@ -2014,18 +2025,8 @@ impl Session {
             include_network,
             debug,
         } = opts;
-        let limit = limit.clamp(1, 200);
-        let mut static_route_keys = HashSet::new();
         let nav = if let Some(u) = url {
-            if exec_scripts {
-                self.navigate(u, false).await?;
-                if let Ok(static_model) = self.route_discover(goal, limit) {
-                    static_route_keys = discovery_route_keys_from_model(&static_model);
-                }
-                Some(self.navigate(u, true).await?)
-            } else {
-                Some(self.navigate(u, false).await?)
-            }
+            Some(self.navigate(u, exec_scripts).await?)
         } else {
             None
         };
@@ -2054,6 +2055,16 @@ impl Session {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .or_else(|| self.network_scope_id(None));
+        let static_route_keys = if exec_scripts {
+            self.last_body
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .map(|body| static_dom_route_keys_from_body(&body, &current_url))
+                .unwrap_or_default()
+        } else {
+            HashSet::new()
+        };
 
         let mut discovery_errors = Vec::new();
         let route_model = match self.route_discover(goal, limit) {
@@ -2094,7 +2105,7 @@ impl Session {
                     item,
                     source,
                     "document_route",
-                    0.72,
+                    DISCOVERY_DOM_CONFIDENCE,
                     &current_url,
                 );
             }
@@ -2113,7 +2124,7 @@ impl Session {
                     item,
                     source,
                     "inferred_route",
-                    0.68,
+                    DISCOVERY_INFERRED_CONFIDENCE,
                     &current_url,
                 );
             }
@@ -2138,7 +2149,7 @@ impl Session {
                                 item,
                                 "network_json",
                                 "network_route",
-                                0.58,
+                                DISCOVERY_NETWORK_OBJECT_CONFIDENCE,
                                 &current_url,
                             );
                         }
@@ -2164,7 +2175,7 @@ impl Session {
                         "url": capture.url,
                         "method": capture.method,
                         "source": "network_capture",
-                        "confidence": 0.62,
+                        "confidence": DISCOVERY_CAPTURE_API_CONFIDENCE,
                         "provenance": [{
                             "source": "network",
                             "capture_id": capture.capture_id,
@@ -2185,7 +2196,7 @@ impl Session {
                             "url": item.get("url").cloned().unwrap_or(Value::Null),
                             "method": capture.method,
                             "source": "network_json",
-                            "confidence": item.get("confidence").cloned().unwrap_or(json!(0.56)),
+                            "confidence": item.get("confidence").cloned().unwrap_or(json!(DISCOVERY_RAW_NETWORK_API_CONFIDENCE)),
                             "provenance": item.get("provenance").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
                         }));
                     }
@@ -2195,7 +2206,7 @@ impl Session {
                         &item,
                         source,
                         "network_route",
-                        0.54,
+                        DISCOVERY_NETWORK_ROUTE_CONFIDENCE,
                         &current_url,
                     );
                 }
@@ -3133,18 +3144,41 @@ fn is_tracking_query_param(key: &str) -> bool {
         )
 }
 
-fn discovery_route_keys_from_model(model: &Value) -> HashSet<String> {
+fn static_dom_route_keys_from_body(body: &str, base_url: &str) -> HashSet<String> {
+    let tree = parse_html_to_tree(body);
     let mut out = HashSet::new();
-    for section in ["routes", "inferred_urls"] {
-        if let Some(items) = model.get(section).and_then(|v| v.as_array()) {
-            for item in items {
-                if let Some(url) = item.get("url").and_then(|v| v.as_str()) {
-                    out.insert(discovery_route_key(url));
+    let base = url::Url::parse(base_url).ok();
+    collect_static_dom_route_keys(&tree, base.as_ref(), &mut out);
+    out
+}
+
+fn collect_static_dom_route_keys(node: &Value, base: Option<&url::Url>, out: &mut HashSet<String>) {
+    let Some(obj) = node.as_object() else {
+        return;
+    };
+    if obj.get("type").and_then(|t| t.as_str()) == Some("element") {
+        let tag = obj.get("tag").and_then(|t| t.as_str()).unwrap_or("");
+        let attrs = obj.get("attrs").and_then(|a| a.as_object());
+        let route_attr = match tag {
+            "a" | "area" => attrs.and_then(|a| a.get("href")).and_then(|v| v.as_str()),
+            "form" => attrs.and_then(|a| a.get("action")).and_then(|v| v.as_str()),
+            _ => None,
+        };
+        if let Some(raw) = route_attr.filter(|s| !s.trim().is_empty()) {
+            if let Some(base) = base {
+                if let Ok(resolved) = base.join(raw) {
+                    out.insert(discovery_route_key(resolved.as_str()));
                 }
+            } else {
+                out.insert(discovery_route_key(raw));
             }
         }
     }
-    out
+    if let Some(children) = obj.get("children").and_then(|c| c.as_array()) {
+        for child in children {
+            collect_static_dom_route_keys(child, base, out);
+        }
+    }
 }
 
 fn discovery_page_owned(base: &str, raw_url: &str) -> bool {
@@ -3157,9 +3191,7 @@ fn discovery_page_owned(base: &str, raw_url: &str) -> bool {
     };
     match (base_url.host_str(), target.host_str()) {
         (Some(base_host), Some(target_host)) => {
-            target_host == base_host
-                || target_host.ends_with(&format!(".{base_host}"))
-                || base_host.ends_with(&format!(".{target_host}"))
+            target_host == base_host || target_host.ends_with(&format!(".{base_host}"))
         }
         _ => false,
     }
@@ -3217,57 +3249,61 @@ fn raw_network_route_candidates(
         roots.push((value, "$".to_string()));
     }
 
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    let mut visited = 0usize;
+    let mut state = RawNetworkRouteState {
+        capture,
+        limit,
+        visited: 0,
+        seen: HashSet::new(),
+        out: Vec::new(),
+    };
     for (value, path) in roots {
-        collect_raw_network_routes(
-            &value,
-            &path,
-            capture,
-            limit,
-            &mut visited,
-            &mut seen,
-            &mut out,
-        );
-        if out.len() >= limit {
+        collect_raw_network_routes(&value, &path, 0, &mut state);
+        if state.out.len() >= limit {
             break;
         }
     }
-    out
+    state.out
+}
+
+struct RawNetworkRouteState<'a> {
+    capture: &'a network_store::NetworkCapture,
+    limit: usize,
+    visited: usize,
+    seen: HashSet<String>,
+    out: Vec<Value>,
 }
 
 fn collect_raw_network_routes(
     value: &Value,
     path: &str,
-    capture: &network_store::NetworkCapture,
-    limit: usize,
-    visited: &mut usize,
-    seen: &mut HashSet<String>,
-    out: &mut Vec<Value>,
+    depth: usize,
+    state: &mut RawNetworkRouteState<'_>,
 ) {
-    if *visited >= limit.saturating_mul(120).max(400) || out.len() >= limit {
+    if depth > RAW_NETWORK_ROUTE_MAX_DEPTH
+        || state.visited >= state.limit.saturating_mul(120).max(400)
+        || state.out.len() >= state.limit
+    {
         return;
     }
-    *visited += 1;
+    state.visited += 1;
     match value {
         Value::Object(map) => {
             for (key, child) in map {
                 let child_path = json_path_child(path, key);
                 if let Some(raw) = child.as_str()
                     && is_route_like_json_key(key)
-                    && let Some(url) = resolve_json_url(raw, &capture.url)
+                    && let Some(url) = resolve_json_url(raw, &state.capture.url)
                 {
                     push_raw_network_route_candidate(
                         &url,
                         raw,
                         key,
                         &child_path,
-                        capture,
-                        seen,
-                        out,
+                        state.capture,
+                        &mut state.seen,
+                        &mut state.out,
                     );
-                    if out.len() >= limit {
+                    if state.out.len() >= state.limit {
                         return;
                     }
                 }
@@ -3276,7 +3312,7 @@ fn collect_raw_network_routes(
                 {
                     for (idx, entry) in arr.iter().take(100).enumerate() {
                         if let Some(raw) = entry.as_str()
-                            && let Some(url) = resolve_json_url(raw, &capture.url)
+                            && let Some(url) = resolve_json_url(raw, &state.capture.url)
                         {
                             let entry_path = format!("{child_path}[{idx}]");
                             push_raw_network_route_candidate(
@@ -3284,27 +3320,19 @@ fn collect_raw_network_routes(
                                 raw,
                                 key,
                                 &entry_path,
-                                capture,
-                                seen,
-                                out,
+                                state.capture,
+                                &mut state.seen,
+                                &mut state.out,
                             );
-                            if out.len() >= limit {
+                            if state.out.len() >= state.limit {
                                 return;
                             }
                         }
                     }
                 }
                 if matches!(child, Value::Object(_) | Value::Array(_)) {
-                    collect_raw_network_routes(
-                        child,
-                        &child_path,
-                        capture,
-                        limit,
-                        visited,
-                        seen,
-                        out,
-                    );
-                    if out.len() >= limit {
+                    collect_raw_network_routes(child, &child_path, depth + 1, state);
+                    if state.out.len() >= state.limit {
                         return;
                     }
                 }
@@ -3313,8 +3341,8 @@ fn collect_raw_network_routes(
         Value::Array(arr) => {
             for (idx, child) in arr.iter().take(250).enumerate() {
                 let child_path = format!("{path}[{idx}]");
-                collect_raw_network_routes(child, &child_path, capture, limit, visited, seen, out);
-                if out.len() >= limit {
+                collect_raw_network_routes(child, &child_path, depth + 1, state);
+                if state.out.len() >= state.limit {
                     return;
                 }
             }
@@ -3350,8 +3378,8 @@ fn push_raw_network_route_candidate(
         "url": url,
         "label": label,
         "kind": kind,
-        "score": if kind == "api_endpoint" { 0.48 } else { 0.52 },
-        "confidence": if kind == "api_endpoint" { 0.56 } else { 0.58 },
+        "score": if kind == "api_endpoint" { DISCOVERY_RAW_NETWORK_API_SCORE } else { DISCOVERY_RAW_NETWORK_ROUTE_SCORE },
+        "confidence": if kind == "api_endpoint" { DISCOVERY_RAW_NETWORK_API_CONFIDENCE } else { DISCOVERY_RAW_NETWORK_ROUTE_CONFIDENCE },
         "matched_terms": [],
         "provenance": [{
             "source": "network",
@@ -6448,7 +6476,11 @@ async fn mcp_main(profile: Profile) -> Result<()> {
 
 #[cfg(test)]
 mod discovery_tests {
-    use super::{discovery_route_key, parse_discover_options, upsert_discovery_route};
+    use super::{
+        discovery_page_owned, discovery_route_key, parse_discover_options,
+        raw_network_route_candidates, static_dom_route_keys_from_body, upsert_discovery_route,
+    };
+    use crate::network_store::{ContentKind, NetworkCapture};
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -6458,6 +6490,36 @@ mod discovery_tests {
             discovery_route_key("https://example.com/docs/?utm_source=x&b=2&a=1#top"),
             "https://example.com/docs?a=1&b=2"
         );
+    }
+
+    #[test]
+    fn discovery_page_owned_rejects_sibling_suffix_domains() {
+        assert!(discovery_page_owned(
+            "https://example.com/start",
+            "https://docs.example.com/path"
+        ));
+        assert!(discovery_page_owned(
+            "https://example.com/start",
+            "https://example.com/path"
+        ));
+        assert!(!discovery_page_owned(
+            "https://example.com/start",
+            "https://evil-example.com/path"
+        ));
+        assert!(!discovery_page_owned(
+            "https://app.example.com/start",
+            "https://example.com/path"
+        ));
+    }
+
+    #[test]
+    fn static_dom_route_keys_parse_initial_html_without_navigation() {
+        let keys = static_dom_route_keys_from_body(
+            r#"<a href="/docs/">Docs</a><form action="/search"></form>"#,
+            "https://example.com/base/page",
+        );
+        assert!(keys.contains("https://example.com/docs"));
+        assert!(keys.contains("https://example.com/search"));
     }
 
     #[test]
@@ -6521,6 +6583,29 @@ mod discovery_tests {
         assert!(
             parse_discover_options(&json!({"url": "https://example.com", "limit": 200})).is_ok()
         );
+    }
+
+    #[test]
+    fn raw_network_route_candidates_respects_depth_limit() {
+        let mut nested = json!("/too-deep");
+        for _ in 0..40 {
+            nested = json!({"url": nested});
+        }
+        let capture = NetworkCapture {
+            capture_id: 1,
+            url: "https://example.com/api/discovery".to_string(),
+            method: "GET".to_string(),
+            status: 200,
+            content_type: "application/json".to_string(),
+            kind: ContentKind::Json,
+            body_bytes: 10,
+            body_preview: serde_json::to_string(&nested).expect("nested json"),
+            body_truncated: false,
+            captured_at_ms: 0,
+            score: 100,
+            navigation_id: Some("nav_1".to_string()),
+        };
+        assert!(raw_network_route_candidates(&capture, 10).is_empty());
     }
 }
 

@@ -334,7 +334,7 @@ pub fn detect_browser_route(status: u16, body: &str, blockmap: &Value) -> Option
         .and_then(|v| v.as_array())
         .map(|a| a.len())
         .unwrap_or(0);
-    let raw_route_surface = contains_any(&lower, &["<a ", "<form", "href="]);
+    let raw_route_surface = has_raw_route_surface(&lower);
 
     let mut evidence: Vec<&'static str> = Vec::new();
     let (reason, confidence) = if contains_any(
@@ -406,6 +406,10 @@ pub fn detect_browser_route(status: u16, body: &str, blockmap: &Value) -> Option
         "evidence": evidence,
         "hint": "Route this page to real browser automation; unbrowser should not keep retrying the same response.",
     }))
+}
+
+fn has_raw_route_surface(lower_body: &str) -> bool {
+    contains_any(lower_body, &["<a", "<area", "<form", "href", "action"])
 }
 
 fn is_rate_limited(status: u16, lower_body: &str, retry_after: Option<&str>) -> bool {

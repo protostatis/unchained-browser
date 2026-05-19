@@ -99,7 +99,10 @@ DISCOVERY_JSON = {
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    counts: dict[str, int] = {}
+
     def do_GET(self):
+        Handler.counts[self.path] = Handler.counts.get(self.path, 0) + 1
         if self.path == "/" or self.path.startswith("/?"):
             body = INDEX_HTML.encode()
             content_type = "text/html; charset=utf-8"
@@ -161,7 +164,10 @@ class Unbrowser:
             + "\n"
         )
         self.proc.stdin.flush()
-        out = json.loads(self.proc.stdout.readline())
+        line = self.proc.stdout.readline()
+        if not line:
+            raise AssertionError("unbrowser exited without response")
+        out = json.loads(line)
         if "error" in out:
             raise AssertionError(out["error"])
         return out.get("result")
@@ -233,6 +239,9 @@ def main() -> int:
                       div.href = '/not-a-link';
                       var fragment = document.createElement('a');
                       fragment.href = '#details';
+                      var nulled = document.createElement('a');
+                      nulled.href = '/temporary';
+                      nulled.href = null;
                       return {
                         attr: a.getAttribute('href'),
                         prop: a.href,
@@ -241,7 +250,8 @@ def main() -> int:
                         divAttr: div.getAttribute('href'),
                         divProp: div.href,
                         divMatches: div.matches('[href]'),
-                        fragmentProp: fragment.href
+                        fragmentProp: fragment.href,
+                        nulledMatches: nulled.matches('[href]')
                       };
                     })())
                     """,
@@ -254,6 +264,7 @@ def main() -> int:
             ok &= check("unsupported href stays expando", reflection["divAttr"] is None and reflection["divProp"] == "/not-a-link")
             ok &= check("unsupported href does not match [href]", reflection["divMatches"] is False)
             ok &= check("fragment href resolves", reflection["fragmentProp"] == base + "#details")
+            ok &= check("null href removes route attribute", reflection["nulledMatches"] is False)
 
             stores = ub.call("network_stores", limit=10)
             store_urls = {s.get("url") for s in stores}
@@ -264,6 +275,7 @@ def main() -> int:
             ok &= check("route_discover includes JS-created route", base + "docs/api" in route_urls)
             ok &= check("route_discover includes timer-created route", base + "reports/monthly" in route_urls)
 
+            Handler.counts.clear()
             discovery = ub.call(
                 "discover",
                 url=base,
@@ -276,6 +288,7 @@ def main() -> int:
             sources_by_url = {r.get("url"): set(r.get("sources") or []) for r in discovery.get("routes", [])}
             api_urls = {e.get("url") for e in discovery.get("api_endpoints", [])}
             ok &= check("discover merges JS-created routes", base + "docs/api" in discovery_urls)
+            ok &= check("discover exec_scripts navigates once", Handler.counts.get("/", 0) == 1)
             ok &= check("discover merges timer-created routes", base + "reports/monthly" in discovery_urls)
             ok &= check("discover labels static route source", "static_dom" in sources_by_url.get(base + "pricing", set()))
             ok &= check("discover labels JS route source", "js_dom" in sources_by_url.get(base + "docs/api", set()))
@@ -291,6 +304,7 @@ def main() -> int:
             ub.close()
     finally:
         httpd.shutdown()
+        httpd.server_close()
 
     print("ALL PASS" if ok else "FAILURES")
     return 0 if ok else 1

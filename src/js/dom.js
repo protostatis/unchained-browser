@@ -656,6 +656,11 @@
         return raw;
       },
       set: function(v) {
+        if (resolveAsUrl && v == null) {
+          if (supportsReflectedProperty(this, supportedTags)) this.removeAttribute(attrName);
+          else setUnsupportedExpando(this, prop, v);
+          return;
+        }
         var value = v == null ? '' : String(v);
         if (!supportsReflectedProperty(this, supportedTags)) {
           setUnsupportedExpando(this, prop, value);

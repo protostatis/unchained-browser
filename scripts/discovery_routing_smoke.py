@@ -85,6 +85,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path.startswith("/external-only"):
             body = EXTERNAL_ONLY_HTML
         elif self.path.startswith("/aws"):
+            # Synthetic AWS WAF smoke: real AWS WAF JavaScript challenges often
+            # use 202 Accepted while the browser computes/replays a token.
             status = 202
             body = AWS_WAF_HTML
         else:
@@ -121,7 +123,10 @@ class Unbrowser:
             + "\n"
         )
         self.proc.stdin.flush()
-        out = json.loads(self.proc.stdout.readline())
+        line = self.proc.stdout.readline()
+        if not line:
+            raise AssertionError("unbrowser exited without response")
+        out = json.loads(line)
         if "error" in out:
             raise AssertionError(out["error"])
         return out.get("result")
@@ -196,6 +201,7 @@ def main() -> int:
     finally:
         ub.close()
         httpd.shutdown()
+        httpd.server_close()
 
     print("ALL PASS" if ok else "FAILURES")
     return 0 if ok else 1
