@@ -227,10 +227,21 @@ def main() -> int:
                     JSON.stringify((function () {
                       var a = document.createElement('a');
                       a.href = '/property-only';
+                      var img = document.createElement('img');
+                      img.src = '//cdn.example.com/image.png';
+                      var div = document.createElement('div');
+                      div.href = '/not-a-link';
+                      var fragment = document.createElement('a');
+                      fragment.href = '#details';
                       return {
                         attr: a.getAttribute('href'),
                         prop: a.href,
-                        matches: a.matches('[href]')
+                        matches: a.matches('[href]'),
+                        imgProp: img.src,
+                        divAttr: div.getAttribute('href'),
+                        divProp: div.href,
+                        divMatches: div.matches('[href]'),
+                        fragmentProp: fragment.href
                       };
                     })())
                     """,
@@ -239,6 +250,10 @@ def main() -> int:
             ok &= check("href setter writes href attribute", reflection["attr"] == "/property-only")
             ok &= check("href getter resolves against location", reflection["prop"] == base + "property-only")
             ok &= check("property-created href matches [href]", reflection["matches"] is True)
+            ok &= check("protocol-relative src resolves", reflection["imgProp"] == "http://cdn.example.com/image.png")
+            ok &= check("unsupported href stays expando", reflection["divAttr"] is None and reflection["divProp"] == "/not-a-link")
+            ok &= check("unsupported href does not match [href]", reflection["divMatches"] is False)
+            ok &= check("fragment href resolves", reflection["fragmentProp"] == base + "#details")
 
             stores = ub.call("network_stores", limit=10)
             store_urls = {s.get("url") for s in stores}

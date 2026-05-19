@@ -628,10 +628,25 @@
     set: function(v) { this.setAttribute('class', v); }
   });
 
-  function reflectStringProperty(prop, attrName, resolveAsUrl) {
+  function supportsReflectedProperty(el, supportedTags) {
+    if (!supportedTags) return true;
+    return supportedTags.indexOf(el.tagName) !== -1;
+  }
+
+  function setUnsupportedExpando(el, prop, value) {
+    if (!el.__expandoProps) el.__expandoProps = {};
+    el.__expandoProps[prop] = value;
+  }
+
+  function getUnsupportedExpando(el, prop) {
+    return el.__expandoProps && el.__expandoProps[prop] !== undefined ? el.__expandoProps[prop] : undefined;
+  }
+
+  function reflectStringProperty(prop, attrName, resolveAsUrl, supportedTags) {
     attrName = attrName || prop;
     Object.defineProperty(Element.prototype, prop, {
       get: function() {
+        if (!supportsReflectedProperty(this, supportedTags)) return getUnsupportedExpando(this, prop);
         var raw = this.getAttribute(attrName);
         if (raw == null) return '';
         if (resolveAsUrl) {
@@ -641,15 +656,23 @@
         return raw;
       },
       set: function(v) {
-        this.setAttribute(attrName, v == null ? '' : String(v));
+        var value = v == null ? '' : String(v);
+        if (!supportsReflectedProperty(this, supportedTags)) {
+          setUnsupportedExpando(this, prop, value);
+          return;
+        }
+        this.setAttribute(attrName, value);
       },
       configurable: true,
     });
   }
 
-  ['href', 'src', 'action'].forEach(function(prop) {
-    reflectStringProperty(prop, prop, true);
-  });
+  // This VDOM has one Element class rather than per-tag HTMLElement subclasses.
+  // Gate URL-bearing reflected properties by tag so `div.href = ...` behaves as
+  // an expando property instead of creating a selector-visible href attribute.
+  reflectStringProperty('href', 'href', true, ['A', 'AREA', 'BASE', 'LINK']);
+  reflectStringProperty('src', 'src', true, ['SCRIPT', 'IMG', 'IFRAME', 'INPUT', 'SOURCE', 'TRACK', 'VIDEO', 'AUDIO', 'EMBED']);
+  reflectStringProperty('action', 'action', true, ['FORM']);
   ['method', 'name', 'type', 'placeholder', 'title', 'alt', 'rel', 'target'].forEach(function(prop) {
     reflectStringProperty(prop, prop, false);
   });

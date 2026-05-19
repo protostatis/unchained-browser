@@ -6,6 +6,7 @@ This covers the benchmark failure modes without live network dependencies:
 - dictionary/search form must expose a query URL and not browser-route;
 - enable-JS shell must browser-route;
 - AWS WAF-like interstitial must challenge-route.
+- same-origin filtering that removes all routes must return a no-routes signal.
 """
 from __future__ import annotations
 
@@ -58,6 +59,14 @@ SHELL_HTML = """<!doctype html><html><head><title>Enable JavaScript</title></hea
   <main>Please enable JavaScript to continue. This application requires JavaScript to be enabled.</main>
 </body></html>"""
 
+EXTERNAL_ONLY_HTML = """<!doctype html><html><head><title>External Only</title></head><body>
+  <main>
+    <h1>External Only</h1>
+    <p>This page links out but has no page-owned route surface.</p>
+    <a href="https://external.example/docs">External docs</a>
+  </main>
+</body></html>"""
+
 AWS_WAF_HTML = """<!doctype html><html><head><title>Checking</title></head><body>
   <script>window.awsWafCookieDomainList = [];</script>
   <script src="/awswaf/challenge.js"></script>
@@ -73,6 +82,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = DICTIONARY_HTML
         elif self.path.startswith("/shell"):
             body = SHELL_HTML
+        elif self.path.startswith("/external-only"):
+            body = EXTERNAL_ONLY_HTML
         elif self.path.startswith("/aws"):
             status = 202
             body = AWS_WAF_HTML
@@ -173,6 +184,10 @@ def main() -> int:
         shell_reasons = [e.get("reason") for e in shell.get("escalations") or []]
         ok &= check("enable-JS shell browser-routes", "enable_js_interstitial" in shell_reasons)
         ok &= check("enable-JS shell top-ranks Chrome", top_tools(shell)[0] == "chrome_escalation")
+
+        external_only = ub.call("discover", url=base + "/external-only", same_origin=True, limit=20)
+        external_reasons = [e.get("reason") for e in external_only.get("escalations") or []]
+        ok &= check("same-origin empty result signals no routes", "no_routes_found" in external_reasons)
 
         waf = ub.call("discover", url=base + "/aws", goal="search controller", limit=20)
         challenge = (waf.get("navigate_summary") or waf.get("navigate") or {}).get("challenge") or {}

@@ -236,7 +236,7 @@ unbrowser 2> >(python3 scripts/watch.py)
 
 `blockmap.selectors` surfaces concrete selector hints for the current page (`data-testid`, `aria-label`, `role`) so agents can bias toward `query` or `query_text` without guessing.
 
-`discover` is the route-finding layer to use before extraction when you need to learn where information lives. By default it returns compact `navigate_summary`, `route_discover_summary`, and `network_extract_summary` fields plus the merged `routes`, `forms`, `api_endpoints`, `network_sources`, and `escalations`. Pass `debug: true` only when you need the full nested `navigate`, `route_discover`, and `network_extract` payloads for diagnosis.
+`discover` is the route-finding layer to use before extraction when you need to learn where information lives. By default it returns compact `navigate_summary`, `route_discover_summary`, and `network_extract_summary` fields plus the merged `routes`, `forms`, `api_endpoints`, `network_sources`, and `escalations`. Pass `debug: true` only when you need the full nested `navigate`, `route_discover`, and `network_extract` payloads for diagnosis. `limit` must be between 1 and 200; invalid `url` / `limit` inputs fail at the RPC boundary.
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"discover","params":{"url":"https://example.com","goal":"find pricing docs api status","same_origin":true,"limit":25}}

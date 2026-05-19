@@ -410,6 +410,60 @@ struct DiscoverOptions<'a> {
     debug: bool,
 }
 
+fn parse_discover_options(params: &Value) -> Result<DiscoverOptions<'_>> {
+    let url = match params.get("url") {
+        Some(Value::String(s)) => Some(s.as_str()),
+        Some(Value::Null) | None => None,
+        Some(_) => return Err(anyhow!("discover.url must be a string")),
+    };
+    validate_discover_url(url)?;
+
+    let limit = match params.get("limit") {
+        Some(v) => v
+            .as_u64()
+            .ok_or_else(|| anyhow!("discover.limit must be an integer"))?,
+        None => 50,
+    };
+    if !(1..=200).contains(&limit) {
+        return Err(anyhow!("discover.limit must be between 1 and 200"));
+    }
+
+    Ok(DiscoverOptions {
+        url,
+        goal: params.get("goal").and_then(|v| v.as_str()),
+        exec_scripts: params
+            .get("exec_scripts")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        limit: limit as u32,
+        same_origin: params
+            .get("same_origin")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        include_network: params
+            .get("include_network")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        debug: params
+            .get("debug")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
+}
+
+fn validate_discover_url(raw: Option<&str>) -> Result<()> {
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    let parsed = url::Url::parse(raw).map_err(|e| anyhow!("invalid discover.url: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(()),
+        scheme => Err(anyhow!(
+            "discover.url must use http or https, got '{scheme}'"
+        )),
+    }
+}
+
 impl Session {
     fn new(profile: &Profile, policy_block: bool) -> Result<Self> {
         let js_rt = rquickjs::Runtime::new().context("rquickjs Runtime::new")?;
@@ -2174,13 +2228,27 @@ impl Session {
         });
         routes.truncate(limit as usize);
 
-        let escalations = discovery_escalations(
+        let form_count = forms.as_array().map(|a| a.len()).unwrap_or(0);
+        let mut escalations = discovery_escalations(
             &self.last_challenge,
             &self.last_rate_limit,
             &self.last_browser_route,
             routes.len(),
-            forms.as_array().map(|a| a.len()).unwrap_or(0),
+            form_count,
         );
+        if same_origin && routes.is_empty() && form_count == 0 && escalations.is_empty() {
+            escalations.push(json!({
+                "reason": "no_routes_found",
+                "recommended_tool": if exec_scripts { "chrome" } else { "discover_exec_scripts" },
+                "confidence": if exec_scripts { 0.66 } else { 0.58 },
+                "evidence": ["discover.same_origin_filter"],
+                "hint": if exec_scripts {
+                    "No same-origin routes or forms were discovered after script execution; use Chrome if the task requires hidden UI state."
+                } else {
+                    "No same-origin routes or forms were discovered on the static pass; retry discover with exec_scripts:true before escalating."
+                },
+            }));
+        }
 
         let navigate_summary = summarize_discover_navigate(nav.as_ref());
         let route_discover_summary = route_model
@@ -2207,7 +2275,7 @@ impl Session {
             "debug": debug,
             "summary": {
                 "routes": routes.len(),
-                "forms": forms.as_array().map(|a| a.len()).unwrap_or(0),
+                "forms": form_count,
                 "api_endpoints": api_endpoints.len(),
                 "network_sources": network_sources.len(),
                 "escalations": escalations.len(),
@@ -5079,6 +5147,9 @@ fn derive_tool_likelihoods(
     let submit_score = 0.05 + 1.30 * form_signal + 0.60 * input_signal + 0.10 * page_structure
         - 0.05 * challenge_score;
 
+    // Route discovery is favored by concrete route/form affordances, but it is
+    // deliberately discounted for thin shells and JS-filled placeholders where
+    // a route graph would likely be empty or misleading.
     let route_discover_score = 0.08
         + 0.70 * link_signal
         + 1.05 * form_signal
@@ -5141,7 +5212,7 @@ fn apply_browser_route_tool_advice(tool_advice: &mut Value, browser_route: &Opti
         .unwrap_or(0.0);
     let reason = route.get("reason").and_then(|v| v.as_str()).unwrap_or("");
     let threshold = if reason == "missing_primary_action" {
-        0.85
+        challenge::MISSING_PRIMARY_ACTION_ESCALATION_THRESHOLD
     } else {
         0.70
     };
@@ -5560,50 +5631,13 @@ async fn rpc_main(profile: Profile) -> Result<()> {
                     Err(e) => err_response(id, -6, e.to_string()),
                 }
             }
-            "discover" => {
-                let url = req.params.get("url").and_then(|v| v.as_str());
-                let goal = req.params.get("goal").and_then(|v| v.as_str());
-                let exec = req
-                    .params
-                    .get("exec_scripts")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let limit = req
-                    .params
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(50) as u32;
-                let same_origin = req
-                    .params
-                    .get("same_origin")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let include_network = req
-                    .params
-                    .get("include_network")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                let debug = req
-                    .params
-                    .get("debug")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                match session
-                    .discover(DiscoverOptions {
-                        url,
-                        goal,
-                        exec_scripts: exec,
-                        limit,
-                        same_origin,
-                        include_network,
-                        debug,
-                    })
-                    .await
-                {
+            "discover" => match parse_discover_options(&req.params) {
+                Ok(opts) => match session.discover(opts).await {
                     Ok(v) => ok_response(id, v),
                     Err(e) => err_response(id, -6, e.to_string()),
-                }
-            }
+                },
+                Err(e) => err_response(id, -32602, e.to_string()),
+            },
             "network_extract" => {
                 let query = req
                     .params
@@ -5929,12 +5963,12 @@ fn mcp_tools() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "url": { "type": "string", "description": "Optional URL to navigate before discovery. If omitted, discovers on the current page." },
+                    "url": { "type": "string", "description": "Optional absolute http(s) URL to navigate before discovery. If omitted, discovers on the current page." },
                     "goal": { "type": "string", "description": "Optional goal/query used to rank routes and build query URLs." },
                     "exec_scripts": { "type": "boolean", "description": "Run page scripts during navigation when url is provided. Default false; enable when static discovery is insufficient." },
                     "same_origin": { "type": "boolean", "description": "If true, only return page-owned routes." },
                     "include_network": { "type": "boolean", "description": "Include captured network JSON objects and API-like captures. Default true." },
-                    "limit": { "type": "integer", "description": "Max routes to return after dedupe/ranking (default 50)." },
+                    "limit": { "type": "integer", "description": "Max routes to return after dedupe/ranking, 1-200 (default 50)." },
                     "debug": { "type": "boolean", "description": "If true, include full nested navigate, route_discover, and network_extract payloads. Default false returns compact summaries." }
                 }
             }
@@ -6195,33 +6229,8 @@ async fn dispatch_tool(session: &mut Session, name: &str, args: &Value) -> Resul
             session.route_discover(goal, limit)
         }
         "discover" => {
-            let url = str_arg("url");
-            let goal = str_arg("goal");
-            let exec = args
-                .get("exec_scripts")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as u32;
-            let same_origin = args
-                .get("same_origin")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let include_network = args
-                .get("include_network")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            let debug = args.get("debug").and_then(|v| v.as_bool()).unwrap_or(false);
-            session
-                .discover(DiscoverOptions {
-                    url,
-                    goal,
-                    exec_scripts: exec,
-                    limit,
-                    same_origin,
-                    include_network,
-                    debug,
-                })
-                .await
+            let opts = parse_discover_options(args)?;
+            session.discover(opts).await
         }
         "network_extract" => {
             let query = str_arg("query").or_else(|| str_arg("goal"));
@@ -6435,6 +6444,84 @@ async fn mcp_main(profile: Profile) -> Result<()> {
         out.flush()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::{discovery_route_key, parse_discover_options, upsert_discovery_route};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn discovery_route_key_normalizes_common_duplicates() {
+        assert_eq!(
+            discovery_route_key("https://example.com/docs/?utm_source=x&b=2&a=1#top"),
+            "https://example.com/docs?a=1&b=2"
+        );
+    }
+
+    #[test]
+    fn upsert_discovery_route_keeps_unique_sources() {
+        let mut routes = Vec::new();
+        let mut index = HashMap::new();
+        let item = json!({"url": "https://example.com/docs", "score": 0.4});
+
+        upsert_discovery_route(
+            &mut routes,
+            &mut index,
+            &item,
+            "static_dom",
+            "document_route",
+            0.7,
+            "https://example.com/",
+        );
+        upsert_discovery_route(
+            &mut routes,
+            &mut index,
+            &item,
+            "static_dom",
+            "document_route",
+            0.7,
+            "https://example.com/",
+        );
+        upsert_discovery_route(
+            &mut routes,
+            &mut index,
+            &json!({"url": "https://example.com/docs/", "score": 0.8}),
+            "network_json",
+            "network_route",
+            0.6,
+            "https://example.com/",
+        );
+
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            routes[0].get("source").and_then(|v| v.as_str()),
+            Some("static_dom")
+        );
+        let sources = routes[0]
+            .get("sources")
+            .and_then(|v| v.as_array())
+            .expect("sources array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(sources, vec!["static_dom", "network_json"]);
+        assert_eq!(routes[0].get("score").and_then(|v| v.as_f64()), Some(0.8));
+    }
+
+    #[test]
+    fn parse_discover_options_rejects_invalid_surface_params() {
+        assert!(parse_discover_options(&json!({"url": "not a url"})).is_err());
+        assert!(parse_discover_options(&json!({"url": 42})).is_err());
+        assert!(parse_discover_options(&json!({"url": "ftp://example.com"})).is_err());
+        assert!(parse_discover_options(&json!({"limit": 0})).is_err());
+        assert!(parse_discover_options(&json!({"limit": "many"})).is_err());
+        assert!(parse_discover_options(&json!({"limit": 201})).is_err());
+        assert!(
+            parse_discover_options(&json!({"url": "https://example.com", "limit": 200})).is_ok()
+        );
+    }
 }
 
 #[cfg(test)]

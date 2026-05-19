@@ -24,6 +24,13 @@ const HINT_ESCALATE: &str = "Solve once in real Chrome (or via unchainedsky CLI)
 const HINT_BODY: &str = "Inspect `body` to identify the vendor, escalate to real Chrome to confirm \
      the page renders, or skip this URL.";
 
+// `missing_primary_action` is intentionally weak: it is useful as a detector
+// signal for JS-only shells, but too noisy to force Chrome unless confidence is
+// higher than ordinary browser-route reasons. Keep these paired so detector and
+// routing advice drift is obvious in review.
+pub const MISSING_PRIMARY_ACTION_DETECTION_CONFIDENCE: f64 = 0.70;
+pub const MISSING_PRIMARY_ACTION_ESCALATION_THRESHOLD: f64 = 0.85;
+
 // ── Detection result ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -384,7 +391,10 @@ pub fn detect_browser_route(status: u16, body: &str, blockmap: &Value) -> Option
         && !raw_route_surface
     {
         evidence.push("primary_action_text_without_interactives");
-        ("missing_primary_action", 0.70)
+        (
+            "missing_primary_action",
+            MISSING_PRIMARY_ACTION_DETECTION_CONFIDENCE,
+        )
     } else {
         return None;
     };
