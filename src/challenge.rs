@@ -24,6 +24,13 @@ const HINT_ESCALATE: &str = "Solve once in real Chrome (or via unchainedsky CLI)
 const HINT_BODY: &str = "Inspect `body` to identify the vendor, escalate to real Chrome to confirm \
      the page renders, or skip this URL.";
 
+// `missing_primary_action` is intentionally weak: it is useful as a detector
+// signal for JS-only shells, but too noisy to force Chrome unless confidence is
+// higher than ordinary browser-route reasons. Keep these paired so detector and
+// routing advice drift is obvious in review.
+pub const MISSING_PRIMARY_ACTION_DETECTION_CONFIDENCE: f64 = 0.70;
+pub const MISSING_PRIMARY_ACTION_ESCALATION_THRESHOLD: f64 = 0.85;
+
 // ── Detection result ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -327,6 +334,7 @@ pub fn detect_browser_route(status: u16, body: &str, blockmap: &Value) -> Option
         .and_then(|v| v.as_array())
         .map(|a| a.len())
         .unwrap_or(0);
+    let raw_route_surface = has_raw_route_surface(&lower);
 
     let mut evidence: Vec<&'static str> = Vec::new();
     let (reason, confidence) = if contains_any(
@@ -378,9 +386,15 @@ pub fn detect_browser_route(status: u16, body: &str, blockmap: &Value) -> Option
         ("no_interactives", 0.72)
     } else if contains_any(&lower, &["search", "sign in", "checkout", "continue"])
         && interactive_count == 0
+        && structure_count <= 1
+        && body.len() < 20_000
+        && !raw_route_surface
     {
         evidence.push("primary_action_text_without_interactives");
-        ("missing_primary_action", 0.70)
+        (
+            "missing_primary_action",
+            MISSING_PRIMARY_ACTION_DETECTION_CONFIDENCE,
+        )
     } else {
         return None;
     };
@@ -392,6 +406,10 @@ pub fn detect_browser_route(status: u16, body: &str, blockmap: &Value) -> Option
         "evidence": evidence,
         "hint": "Route this page to real browser automation; unbrowser should not keep retrying the same response.",
     }))
+}
+
+fn has_raw_route_surface(lower_body: &str) -> bool {
+    contains_any(lower_body, &["<a", "<area", "<form", "href", "action"])
 }
 
 fn is_rate_limited(status: u16, lower_body: &str, retry_after: Option<&str>) -> bool {
@@ -657,6 +675,25 @@ mod tests {
         assert_eq!(
             route.get("reason").and_then(|v| v.as_str()),
             Some("thin_shell")
+        );
+    }
+
+    #[test]
+    fn browser_route_does_not_flag_static_route_surface() {
+        let blockmap = json!({
+            "title": "Usable News",
+            "structure": [{"role": "main"}],
+            "interactives": {"links": 0, "buttons": 0, "inputs": [], "forms": []},
+            "density": {"thin_shell": false, "likely_js_filled": false}
+        });
+        let route = detect_browser_route(
+            200,
+            r#"<html><body><p>Search our archive or continue reading.</p><a href="/news/climate">Climate guide</a></body></html>"#,
+            &blockmap,
+        );
+        assert!(
+            route.is_none(),
+            "static links should remain cheap-path discoverable"
         );
     }
 

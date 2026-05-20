@@ -225,6 +225,7 @@ unbrowser 2> >(python3 scripts/watch.py)
 | `query {selector}` | CSS query → `[{ref, tag, attrs, text}]` |
 | `text {selector?}` | textContent of FIRST match (default `body`). On Wikipedia/MDN/news sites the first `<p>` is often a hatnote — prefer `text_main` for article body. |
 | `text_main` | textContent of `<main>` / `[role=main]` / single `<article>` / longest non-chrome subtree. Use this for reading article/docs/blog content. |
+| `discover {url?, goal?, exec_scripts?, same_origin?, include_network?, limit?, debug?}` | Cheap-first information discovery. Merges DOM routes, inferred form/query URLs, and network JSON routes into one ranked graph with provenance and escalation hints. Defaults to static discovery; set `exec_scripts: true` when fetch-visible routes are insufficient. |
 | `click {ref}` | dispatch click; auto-follows `<a href>` (returns `{status, url, bytes, headers, blockmap, challenge}` — same shape as `navigate`) |
 | `type {ref, text}` | set value + dispatch input/change events |
 | `submit {ref}` | gather GET-form fields + navigate |
@@ -234,6 +235,14 @@ unbrowser 2> >(python3 scripts/watch.py)
 | `body` | raw HTML of last navigation |
 
 `blockmap.selectors` surfaces concrete selector hints for the current page (`data-testid`, `aria-label`, `role`) so agents can bias toward `query` or `query_text` without guessing.
+
+`discover` is the route-finding layer to use before extraction when you need to learn where information lives. By default it returns compact `navigate_summary`, `route_discover_summary`, and `network_extract_summary` fields plus the merged `routes`, `forms`, `api_endpoints`, `network_sources`, and `escalations`. Pass `debug: true` only when you need the full nested `navigate`, `route_discover`, and `network_extract` payloads for diagnosis. `limit` must be between 1 and 200; invalid `url` / `limit` inputs fail at the RPC boundary.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"discover","params":{"url":"https://example.com","goal":"find pricing docs api status","same_origin":true,"limit":25}}
+```
+
+Use `exec_scripts: true` as an opt-in second pass for pages whose static HTML does not expose enough routes. In that mode, routes already present before scripts are labeled `static_dom`; routes that only appear after JavaScript/timers/fetches are labeled `js_dom`.
 
 CSS selector engine: tag, id, class, `[attr=val]` (also `^=`, `$=`, `*=`, `~=`), all four combinators (` `, `>`, `+`, `~`), `:first/last/nth-child/of-type`, `:only-child/of-type`. Use `eval` for `:not()`, `:has()`, formulas.
 

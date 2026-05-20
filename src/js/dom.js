@@ -278,10 +278,8 @@
     child.__unbHandled = true;
 
     var attrs = child._attributes || {};
-    // Pages set s.src / s.type either via setAttribute (-> _attributes) or
-    // direct property assignment (-> JS slot). Real browsers reflect IDL
-    // properties to attributes; we don't, so check both. Direct property
-    // wins when present (matches what the page believes it set).
+    // Pages set s.src / s.type either via setAttribute or direct property
+    // assignment. Both reflect to attributes below, matching browser DOM.
     var type = ((child.type !== undefined ? child.type : attrs.type) || '').toString().toLowerCase();
     // Skip non-JS script types (JSON-LD, application/json, x-tmpl, etc.).
     // Empty type and "module" both count as JS.
@@ -628,6 +626,60 @@
   Object.defineProperty(Element.prototype, 'className', {
     get: function() { return this._attributes['class'] || ''; },
     set: function(v) { this.setAttribute('class', v); }
+  });
+
+  function supportsReflectedProperty(el, supportedTags) {
+    if (!supportedTags) return true;
+    return supportedTags.indexOf(el.tagName) !== -1;
+  }
+
+  function setUnsupportedExpando(el, prop, value) {
+    if (!el.__expandoProps) el.__expandoProps = {};
+    el.__expandoProps[prop] = value;
+  }
+
+  function getUnsupportedExpando(el, prop) {
+    return el.__expandoProps && el.__expandoProps[prop] !== undefined ? el.__expandoProps[prop] : undefined;
+  }
+
+  function reflectStringProperty(prop, attrName, resolveAsUrl, supportedTags) {
+    attrName = attrName || prop;
+    Object.defineProperty(Element.prototype, prop, {
+      get: function() {
+        if (!supportsReflectedProperty(this, supportedTags)) return getUnsupportedExpando(this, prop);
+        var raw = this.getAttribute(attrName);
+        if (raw == null) return '';
+        if (resolveAsUrl) {
+          var baseHref = (typeof location !== 'undefined' && location.href) || '';
+          return __resolveURL(raw, baseHref);
+        }
+        return raw;
+      },
+      set: function(v) {
+        if (resolveAsUrl && v == null) {
+          if (supportsReflectedProperty(this, supportedTags)) this.removeAttribute(attrName);
+          else setUnsupportedExpando(this, prop, v);
+          return;
+        }
+        var value = v == null ? '' : String(v);
+        if (!supportsReflectedProperty(this, supportedTags)) {
+          setUnsupportedExpando(this, prop, value);
+          return;
+        }
+        this.setAttribute(attrName, value);
+      },
+      configurable: true,
+    });
+  }
+
+  // This VDOM has one Element class rather than per-tag HTMLElement subclasses.
+  // Gate URL-bearing reflected properties by tag so `div.href = ...` behaves as
+  // an expando property instead of creating a selector-visible href attribute.
+  reflectStringProperty('href', 'href', true, ['A', 'AREA', 'BASE', 'LINK']);
+  reflectStringProperty('src', 'src', true, ['SCRIPT', 'IMG', 'IFRAME', 'INPUT', 'SOURCE', 'TRACK', 'VIDEO', 'AUDIO', 'EMBED']);
+  reflectStringProperty('action', 'action', true, ['FORM']);
+  ['method', 'name', 'type', 'placeholder', 'title', 'alt', 'rel', 'target'].forEach(function(prop) {
+    reflectStringProperty(prop, prop, false);
   });
 
   // Boolean HTML attributes that mirror to a same-named JS property. Real
