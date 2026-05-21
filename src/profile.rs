@@ -14,9 +14,9 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Profile {
     pub name: String,
-    pub emulation: rquest_util::Emulation,
+    pub emulation: wreq_util::Emulation,
     pub user_agent: String,
-    // The next four fields are bundled by rquest_util::Emulation already —
+    // The next four fields are bundled by wreq_util::Emulation already —
     // we keep them in the TOML as the source-of-truth documentation of
     // what the emulation profile sends, and the planned fingerprint test
     // harness (Phase 9 follow-up) verifies the wire reality matches.

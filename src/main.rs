@@ -58,30 +58,44 @@ struct CookieJar {
     inner: RwLock<cookie_store::CookieStore>,
 }
 
-impl rquest::cookie::CookieStore for CookieJar {
-    fn set_cookies(&self, url: &url::Url, headers: &mut dyn Iterator<Item = &http::HeaderValue>) {
+impl wreq::cookie::CookieStore for CookieJar {
+    fn set_cookies(&self, headers: &mut dyn Iterator<Item = &http::HeaderValue>, uri: &http::Uri) {
+        let Some(url) = url_from_uri(uri) else {
+            return;
+        };
         let parsed: Vec<cookie::Cookie<'static>> = headers
             .filter_map(|h| h.to_str().ok())
             .filter_map(|s| cookie::Cookie::parse(s.to_string()).ok())
             .collect();
         if let Ok(mut store) = self.inner.write() {
-            store.store_response_cookies(parsed.into_iter(), url);
+            store.store_response_cookies(parsed.into_iter(), &url);
         }
     }
 
-    fn cookies(&self, url: &url::Url) -> Option<http::HeaderValue> {
-        let store = self.inner.read().ok()?;
+    fn cookies(&self, uri: &http::Uri) -> wreq::cookie::Cookies {
+        let Some(url) = url_from_uri(uri) else {
+            return wreq::cookie::Cookies::Empty;
+        };
+        let Ok(store) = self.inner.read() else {
+            return wreq::cookie::Cookies::Empty;
+        };
         let s: String = store
-            .get_request_values(url)
+            .get_request_values(&url)
             .map(|(n, v)| format!("{n}={v}"))
             .collect::<Vec<_>>()
             .join("; ");
         if s.is_empty() {
-            None
+            wreq::cookie::Cookies::Empty
         } else {
-            http::HeaderValue::from_str(&s).ok()
+            http::HeaderValue::from_str(&s)
+                .map(wreq::cookie::Cookies::Compressed)
+                .unwrap_or(wreq::cookie::Cookies::Empty)
         }
     }
+}
+
+fn url_from_uri(uri: &http::Uri) -> Option<url::Url> {
+    url::Url::parse(&uri.to_string()).ok()
 }
 
 impl CookieJar {
@@ -184,7 +198,7 @@ fn build_cookie(item: &Value, default_url: Option<&str>) -> Result<(String, Stri
 
 // =============================================================================
 // Fetch worker — lets page-script `fetch()` calls go through the same
-// rquest::Client we use for navigate (so cookies + Chrome 131 TLS fingerprint
+// wreq::Client we use for navigate (so cookies + Chrome 131 TLS fingerprint
 // stay coherent). One dedicated thread, one current_thread tokio runtime,
 // requests serialized through an mpsc channel. Responses queue into a shared
 // Mutex<Vec<...>> that JS drains via __host_drain_fetches() during settle().
@@ -220,7 +234,7 @@ struct FetchQueue {
     current_nav_id: Arc<Mutex<Option<String>>>,
 }
 
-fn spawn_fetch_worker(http: rquest::Client) -> FetchQueue {
+fn spawn_fetch_worker(http: wreq::Client) -> FetchQueue {
     let (tx, rx) = mpsc::channel::<FetchRequest>();
     let results: Arc<Mutex<Vec<FetchResponse>>> = Arc::new(Mutex::new(Vec::new()));
     let results_for_thread = results.clone();
@@ -287,7 +301,7 @@ fn spawn_fetch_worker(http: rquest::Client) -> FetchQueue {
     }
 }
 
-async fn run_fetch(http: rquest::Client, req: FetchRequest) -> FetchResponse {
+async fn run_fetch(http: wreq::Client, req: FetchRequest) -> FetchResponse {
     let method = match req.method.to_uppercase().as_str() {
         "GET" => http::Method::GET,
         "POST" => http::Method::POST,
@@ -340,7 +354,7 @@ struct Session {
     // drain the microtask queue between timer firings.
     js_rt: rquickjs::Runtime,
     js_ctx: rquickjs::Context,
-    http: rquest::Client,
+    http: wreq::Client,
     jar: Arc<CookieJar>,
     // Fetch worker queue — held to keep the worker thread alive and to
     // expose results to settle() via __pollFetches() driven by the JS layer.
@@ -501,16 +515,16 @@ impl Session {
             now >= deadline
         })));
         let jar = Arc::new(CookieJar::default());
-        let http = rquest::Client::builder()
+        let http = wreq::Client::builder()
             .emulation(profile.emulation)
             .cookie_provider(jar.clone())
             // .emulation(...) appears to clobber the default redirect policy.
             // Explicit follow-up-to-10 matches Chrome's behavior on http://github.com,
             // httpbin.org/redirect/N, and the Yahoo "sad panda" 301 chain.
-            .redirect(rquest::redirect::Policy::limited(10))
+            .redirect(wreq::redirect::Policy::limited(10))
             .build()
-            .context("rquest client build")?;
-        // Spawn the fetch worker thread (uses the same rquest::Client so cookies
+            .context("wreq client build")?;
+        // Spawn the fetch worker thread (uses the same wreq::Client so cookies
         // + TLS fingerprint stay coherent with navigate).
         let fetch = Arc::new(spawn_fetch_worker(http.clone()));
 
@@ -925,21 +939,21 @@ impl Session {
         self.navigate_with(self.http.get(url), exec_scripts).await
     }
 
-    // Shared pipeline: take an already-built rquest::RequestBuilder (GET from
+    // Shared pipeline: take an already-built wreq::RequestBuilder (GET from
     // navigate, POST from submit), send it, run it through DOM seeding,
     // BlockMap, challenge detection, and optional script execution. Keeps
     // GET and POST coherent on cookies/TLS-FP/redirect handling without a
     // second copy of the post-fetch logic.
     async fn navigate_with(
         &mut self,
-        req: rquest::RequestBuilder,
+        req: wreq::RequestBuilder,
         exec_scripts: bool,
     ) -> Result<Value> {
         let nav_start = std::time::Instant::now();
         let nav_id = self.next_nav_id();
         let resp = req.send().await.context("http send")?;
         let status = resp.status().as_u16();
-        let final_url = resp.url().to_string();
+        let final_url = resp.uri().to_string();
         // Defer navigation_started until DOM is seeded — pairing invariant:
         // if navigation_started fires, policy_trace WILL fire before this
         // function returns. Errors above this point (http send, body read,
@@ -949,7 +963,7 @@ impl Session {
         // Snapshot useful response headers before consuming the response body.
         // Multi-value headers (Set-Cookie) are joined with ' || ' since they're
         // mostly diagnostic — the actual cookie storage already happened in
-        // rquest's CookieStore impl.
+        // wreq's CookieStore impl.
         let mut headers: serde_json::Map<String, Value> = serde_json::Map::new();
         // Parallel HashMap for network_store::maybe_capture (it needs a
         // HashMap<String, String>, not the serde_json::Map shape we return).
