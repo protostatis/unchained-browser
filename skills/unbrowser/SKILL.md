@@ -1,6 +1,6 @@
 ---
 name: unbrowser
-description: Cheap first-pass web browsing without launching Chrome — fetch SSR pages, follow links, query the DOM, run JS, detect bot-wall challenges. Escalate to OpenClaw's managed browser when the page can't be served headlessly.
+description: Cheap first-pass web discovery without launching Chrome — fetch SSR pages, run bounded JS, find routes/forms/API endpoints, extract structured data, and detect bot-wall or browser-only escalation points.
 version: 0.0.12
 tags:
   - browser
@@ -18,11 +18,11 @@ metadata:
 
 # unbrowser — Chrome-free first-pass browsing
 
-`unbrowser` is a single static binary that runs page JS in QuickJS and exposes a stateful session over JSON-RPC. It complements OpenClaw's managed browser: use `unbrowser` first for static / SSR / docs / search-result pages, and **escalate to the managed browser when the page tells you to** (signals below).
+`unbrowser` is a single static binary that runs page JS in QuickJS and exposes a stateful session over JSON-RPC. It complements OpenClaw's managed browser: use `unbrowser` first for static / SSR / docs / search-result pages, route/form/API discovery, and structured extraction, then **escalate to the managed browser when the page tells you to** (signals below).
 
 ## Intended use & non-goals
 
-**Intended use:** first-pass scraping of public web pages, navigation of SSR / static sites, multi-step interaction with simple HTML forms (search boxes, GET workflows), and authenticated tasks against credentials **the user has explicitly provided** — e.g. cookies they exported from their own logged-in browser session.
+**Intended use:** first-pass scraping of public web pages, navigation of SSR / static sites, discovery of useful routes/forms/API-like endpoints before extraction, multi-step interaction with simple HTML forms (search boxes, GET workflows), and authenticated tasks against credentials **the user has explicitly provided** — e.g. cookies they exported from their own logged-in browser session.
 
 **Not intended for**, and the agent must refuse:
 
@@ -62,7 +62,8 @@ These rules are conservative on purpose. The skill's purpose is browsing, not au
 - Docs sites, GitHub/GitLab UI, PyPI/npm registry pages, MDN, Stack Overflow.
 - Hacker News, Reddit (old.reddit / .json endpoints), Wikipedia, news articles.
 - Search-result extraction (Google/DDG SERPs, GitHub search, package indexes).
-- Information discovery tasks where you need to find useful routes, forms, API-like endpoints, or escalation targets before extracting content — call `discover` first.
+- Information discovery tasks where you need to find useful routes, forms, API-like endpoints, JS-injected links, or escalation targets before extracting content — call `discover` first.
+- Pages with broad or noisy layouts where a semantic `page_model` is cheaper than reading raw text or inspecting every link.
 - Any flow where you previously reached for `curl` but the response was empty because the site is an SPA shell — `unbrowser` runs the scripts and seeds the DOM.
 - Multi-step flows on simple HTML forms (HN search, Wikipedia search) — `navigate` → `type` into a `ref` → `submit` works.
 
@@ -88,7 +89,7 @@ pipx install pyunbrowser
 uv tool install pyunbrowser
 ```
 
-The wheel ships the platform-specific native binary inside it and registers an `unbrowser` script on `$PATH`. macOS (arm64/x86_64) and Linux (x86_64) are supported; other platforms must build from source (`cargo install --git https://github.com/protostatis/unbrowser`). PyPI distribution name is `pyunbrowser`, not `unbrowser`, due to PyPI name moderation; the binary and import name are still `unbrowser`.
+The wheel ships the platform-specific native binary inside it and registers an `unbrowser` script on `$PATH`. macOS (arm64/x86_64) and Linux (x86_64/aarch64) are supported; other platforms must build from source (`cargo install --git https://github.com/protostatis/unbrowser`). PyPI distribution name is `pyunbrowser`, not `unbrowser`, due to PyPI name moderation; the binary and import name are still `unbrowser`.
 
 ## First-time setup
 
@@ -116,7 +117,7 @@ unbrowser <<'EOF'
 EOF
 ```
 
-`navigate` returns `{status, url, bytes, blockmap, challenge}`. The `blockmap` is your one-shot orientation payload — use it to plan queries before pulling raw HTML.
+`navigate` returns `{status, url, bytes, headers, blockmap, challenge, tool_likelihoods, tool_recommendations}` plus optional `extract`, `scripts`, and network summaries when page signals exist. The `blockmap` is your one-shot orientation payload — use it to plan queries before pulling raw HTML.
 
 ## Quick start (one-shot CLI)
 
@@ -150,15 +151,24 @@ with Client() as ub:
 
 These are the methods the agent will use on every task:
 
-- `navigate {url}` — GET request that matches a real Chrome client's TLS handshake (JA3/JA4) and HTTP/2 frame ordering, so sites that reject non-browser HTTP libraries accept the request. Parses the response, returns blockmap + challenge detection.
+- `navigate {url}` — GET request that matches a real Chrome client's TLS handshake (JA3/JA4) and HTTP/2 frame ordering, so sites that reject non-browser HTTP libraries accept the request. Parses the response, returns blockmap + challenge detection + tool recommendations. With `exec_scripts: true`, runs bounded page JS and reports script execution summaries.
 - `discover {url?, goal?, exec_scripts?, same_origin?, include_network?, limit?, debug?}` — cheap-first route/form/API discovery. Use this before extraction when the task is to find where information lives. Default output is compact summaries plus merged `routes`, `forms`, `api_endpoints`, `network_sources`, and `escalations`; pass `debug: true` only when you need full nested tool payloads.
+- `route_discover {goal?, limit?}` — rank page-owned visible links, forms, and inferred GET query URLs on the current page. Use it before manually guessing `/search`, `/pricing`, `/docs`, or similar routes.
+- `page_model {goal?, types?, limit?}` — return semantic objects such as `search_form`, `nav_link`, `article_card`, `course_card`, `model_card`, `product_card`, `table`, `answer_block`, and `limitation`. Use this when raw text or broad selectors are noisy.
+- `network_extract {query?, types?, limit?, host?, nav_id?}` — parse captured JSON/API/GraphQL/NDJSON responses into scored semantic objects with provenance. Use after `navigate`, `activate`, or `discover` when network captures contain the useful data.
+- `extract {strategy?}` — auto-strategy structured extraction: JSON-LD, Next.js, Nuxt, JSON-in-script, OpenGraph/meta, microdata, then text fallback.
+- `extract_table {selector}` — normalize an HTML table into headers, rows, and row count.
+- `extract_list {item_selector, fields, limit?}` — extract repeated rows/cards using explicit selectors.
+- `extract_cards {selector?, limit?, kind?}` — auto-detect repeated cards/listings/products/articles when you do not know field selectors.
 - `query {selector}` — querySelectorAll. Supports tag/id/class/attribute (`=` `^=` `$=` `*=` `~=`), all four combinators, and `:first-child` / `:last-child` / `:first-of-type` / `:last-of-type` / `:nth-child(N|odd|even)` / `:nth-of-type(N|odd|even)` / `:only-child` / `:only-of-type`. **Not yet:** `:not()`, `:has()`, `An+B`.
 - `text {selector?}` — textContent of first match (default `body`).
 - `body` — raw HTML of the last navigation.
 - `blockmap` — recompute after page JS mutates the DOM.
 - `click {ref}` — dispatch click on the element at `ref` (e.g. `e:142`). `<a href>` auto-follows.
+- `activate {ref? text?}` — higher-level action probe that clicks, settles, and classifies the result as navigation, DOM change, network change, no effect, or unsupported.
 - `type {ref, text}` — set value, fire `input` + `change`.
 - `submit {ref}` — gather GET-form fields, navigate to action URL.
+- `settle {max_ms?, max_iters?}` — drain queued microtasks and timers after eval'd code or actions that schedule async work.
 - `close` — exit.
 
 ## Tool hints
@@ -166,10 +176,14 @@ These are the methods the agent will use on every task:
 `navigate` also returns `tool_likelihoods` and `tool_recommendations`. Use them as a ranking, not a mandate:
 
 - Start with the highest-ranked suggestion that still matches the task.
-- Prefer `discover` when the task is exploratory: find pricing/docs/search/status/API routes, identify forms, or decide whether Chrome is needed before doing extraction.
+- Prefer `discover` when the task is exploratory: find pricing/docs/search/status/API routes, identify forms, inspect captured API surfaces, or decide whether Chrome is needed before doing extraction.
+- Prefer `route_discover` when you are already on the page and only need page-owned routes/forms/query previews.
+- Prefer `page_model` when the page is noisy but has recognizable cards, forms, tables, or answer blocks.
+- Prefer `network_extract` when `navigate`, `activate`, or `discover` reports JSON/API/GraphQL/NDJSON captures.
 - Prefer `query_text` / `query` when the page has stable visible labels or selector hints.
 - Prefer `text_main` when the task is reading article/docs content.
-- Prefer `extract`, `extract_list`, or `extract_table` when the page exposes structured data.
+- Prefer `extract`, `extract_cards`, `extract_list`, or `extract_table` when the page exposes structured data.
+- Prefer `activate` for safe, reversible probes such as menus, tabs, and load-more controls; do not use it for authenticated state-changing actions without confirmation.
 - If `chrome_escalation` is near the top, stop guessing and escalate instead of burning calls.
 
 ## RPC methods — advanced (use sparingly)
@@ -192,6 +206,8 @@ The skill's value isn't pass rate, it's **knowing when to bail**. After every `n
 | `blockmap.density.likely_js_filled === true` AND `blockmap.density.json_scripts > 0` | SSR shell with embedded JSON store | `eval` extraction from `script[type=application/json]` first. |
 | `blockmap.density.likely_js_filled === true` AND `json_scripts === 0` | Empty SSR shell, JS-rendered cells | Escalate. |
 | `blockmap.structure` is empty or only `<body>` and the task needs structured content | DOM didn't settle, or the page is canvas/WebGL-only | Escalate. |
+| `discover.escalations` contains route-level browser-only hints | The cheap path found a specific blocked URL/action | Escalate with that target instead of a vague page-level instruction. |
+| `discover.routes` is empty with `same_origin: true` | No page-owned routes were found | Return that finding or broaden scope; don't invent routes. |
 | `status >= 400` and no challenge detected | Genuine error | Don't escalate — the page is broken / rate-limited. Return the error. |
 
 The `challenge` and `density` fields in `navigate`'s response are designed for exactly this routing decision — read them on every call.
